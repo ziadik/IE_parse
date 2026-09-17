@@ -40,9 +40,14 @@ app.get("/api/save/files", (req, res) => {
 app.get("/api/area/:name", (req, res) => {
   try {
     const name = req.params.name.toUpperCase();
-    const data = extractFileFromSave(path.join(SAVE_DIR, "BALDUR.SAV"), `${name}.ARE`);
+    const data = extractFileFromSave(
+      path.join(SAVE_DIR, "BALDUR.SAV"),
+      `${name}.ARE`,
+    );
     res.json(parseAreFile(data));
-  } catch (e) { res.status(404).json({ error: e.message }); }
+  } catch (e) {
+    res.status(404).json({ error: e.message });
+  }
 });
 
 // --- /api/area/:name/wed ---
@@ -101,6 +106,31 @@ app.get("/api/area/:name/bmp/:index.png", (req, res) => {
       rgba[i*4+0] = c.r; rgba[i*4+1] = c.g; rgba[i*4+2] = c.b; rgba[i*4+3] = c.a;
     }
     res.json({ width: bmp.width, height: bmp.height, bpp: bmp.bpp, rgba: rgba.toString("base64") });
+  } catch (err) { res.status(404).json({ error: err.message }); }
+});
+// /api/tis/:resref — загрузить любой TIS по имени
+app.get("/api/tis/:resref", (req, res) => {
+  try {
+    const resref = req.params.resref.toUpperCase();
+    const key = parseKeyFile(path.join(GAME_DIR, "chitin.key"));
+    const e = key.entries.find(x => x.resref.toUpperCase() === resref && x.type === 0x03eb);
+    if (!e) throw new Error(`${resref}.TIS не найден`);
+
+    const bifName = key.biffs[e.biffIndex].name;
+    const biff = parseBiffFile(path.join(GAME_DIR, bifName));
+    const ts = biff.tilesets.find(t => t.idx === e.tilesetIndex);
+    if (!ts) throw new Error(`tileset idx=${e.tilesetIndex} не найден`);
+
+    const tis = parseTisData(biff.buffer, ts.offset, ts.tileCount, ts.tileSize);
+
+    res.json({
+      tileCount: tis.tileCount,
+      tileSize: tis.tileSize,
+      tiles: tis.tiles.map(t => ({
+        palette: Buffer.from(t.palette).toString("base64"),
+        pixels:  t.pixels.toString("base64"),
+      })),
+    });
   } catch (err) { res.status(404).json({ error: err.message }); }
 });
 

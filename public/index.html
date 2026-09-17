@@ -1,23 +1,47 @@
-<!DOCTYPE html>
+<!doctype html>
 <html>
 <head>
-  <meta charset="utf-8">
+  <meta charset="utf-8" />
   <title>AR2600 Map</title>
   <style>
     body { margin: 0; background: #111; color: #eee; font-family: monospace; }
     #status { padding: 8px; }
-    #map { display: block; margin: 0 auto; image-rendering: pixelated; max-width: 100%; }
+    #viewport {
+      position: relative;
+      width: 100vw;
+      height: calc(100vh - 60px);
+      overflow: hidden;
+      cursor: grab;
+      background: #000;
+    }
+    #viewport.dragging { cursor: grabbing; }
+    #map {
+      position: absolute;
+      top: 0; left: 0;
+      image-rendering: pixelated;
+      transform-origin: 0 0;
+      user-select: none;
+      pointer-events: none;
+    }
     .toolbar { padding: 4px 8px; }
     label { margin-right: 12px; }
+    button { padding: 4px 8px; margin-right: 4px; }
+    #zoomLabel { margin-left: 12px; color: #aaa; }
   </style>
 </head>
 <body>
   <div id="status">Загрузка…</div>
   <div class="toolbar">
-    <label><input type="checkbox" id="showActors" checked> Actors</label>
-    <label><input type="checkbox" id="showDoors" checked> Doors</label>
+    <label><input type="checkbox" id="showActors" checked /> Actors</label>
+    <label><input type="checkbox" id="showDoors" checked /> Doors</label>
+    <button id="zoomIn">+</button>
+    <button id="zoomOut">−</button>
+    <button id="zoomReset">Reset</button>
+    <span id="zoomLabel"></span>
   </div>
-  <canvas id="map"></canvas>
+  <div id="viewport">
+    <canvas id="map"></canvas>
+  </div>
 
 <script>
 (async () => {
@@ -30,20 +54,25 @@
   const wed = await (await fetch(`/api/area/${area}/wed`)).json();
   status.textContent = "TIS…";
   const tis = await (await fetch(`/api/area/${area}/tis`)).json();
+  status.textContent = "WTWAVE…";
+  const wtwave = await (await fetch(`/api/tis/WTWAVE`)).json();
+  status.textContent = "WTPOOL…";
+  const wtpool = await (await fetch(`/api/tis/WTPOOL`)).json();
   status.textContent = "ARE…";
   const are = await (await fetch(`/api/area/${area}`)).json();
 
   window.wed = wed; window.tis = tis; window.are = are;
-  console.log("WED:", wed);
+  window.wtwave = wtwave; window.wtpool = wtpool;
+  console.log("WTWAVE tiles:", wtwave.tileCount, "WTPOOL tiles:", wtpool.tileCount);
   console.log("TIS tiles:", tis.tileCount);
   console.log("ARE:", are);
 
   const TILE = 64;
 
-  // Декодируем тайлы
-  const tileCanvases = tis.tiles.map(t => {
-    const pal = Uint8Array.from(atob(t.palette), c => c.charCodeAt(0));
-    const pix = Uint8Array.from(atob(t.pixels), c => c.charCodeAt(0));
+  // ---- Декодер тайла ----
+  function decodeTile(t) {
+    const pal = Uint8Array.from(atob(t.palette), (c) => c.charCodeAt(0));
+    const pix = Uint8Array.from(atob(t.pixels), (c) => c.charCodeAt(0));
     const c = document.createElement("canvas");
     c.width = TILE; c.height = TILE;
     const cx = c.getContext("2d");
@@ -51,7 +80,7 @@
     for (let i = 0; i < TILE * TILE; i++) {
       const idx = pix[i];
       const r = pal[idx*3+0], g = pal[idx*3+1], b = pal[idx*3+2];
-      if (r === 0 && g === 255 && b === 0) {       // color key
+      if (r === 0 && g === 255 && b === 0) {
         img.data[i*4+3] = 0;
       } else {
         img.data[i*4+0] = r;
@@ -62,10 +91,13 @@
     }
     cx.putImageData(img, 0, 0);
     return c;
-  });
-  window.tileCanvases = tileCanvases;
+  }
 
-  // Рендер базового слоя
+  const tileCanvases   = tis.tiles.map(decodeTile);
+  const wtwaveCanvases = wtwave.tiles.map(decodeTile);
+  const wtpoolCanvases = wtpool.tiles.map(decodeTile);
+
+  // ---- Рендер базового слоя ----
   const base = wed.overlays[0];
   const W = base.width, H = base.height;
   canvas.width = W * TILE;
@@ -84,10 +116,36 @@
       }
     }
   }
-  console.log(`Нарисовано ${drawn} из ${W*H}`);
+  console.log(`Нарисовано ${drawn} из ${W * H}`);
 
-  // Двери
-  if (document.getElementById("showDoors").checked && are.doors && are.vertices) {
+  // ---- Сбор overlay-ячеек ----
+  const waveCells = [];
+  const poolCells = [];
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const t = base.tilemap[y * W + x];
+      if (!t) continue;
+      if (t.overlayFlags & 2) waveCells.push({ x, y, tile: t });
+      else if (t.overlayFlags & 4) poolCells.push({ x, y, tile: t });
+    }
+  }
+  console.log(`WTWAVE cells: ${waveCells.length}, WTPOOL cells: ${poolCells.length}`);
+
+  // ---- Overlay-ячейка через промежуточный canvas (маска) ----
+  const tmpCanvas = document.createElement("canvas");
+  tmpCanvas.width = TILE;
+  tmpCanvas.height = TILE;
+  const tmpCtx = tmpCanvas.getContext("2d");
+
+  function drawOverlayCell(x, y, baseTile, overlayCanvas) {
+    tmpCtx.clearRect(0, 0, TILE, TILE);
+    tmpCtx.drawImage(overlayCanvas, 0, 0);
+    tmpCtx.drawImage(tileCanvases[baseTile.indices[0]], 0, 0);
+    ctx.drawImage(tmpCanvas, x * TILE, y * TILE);
+  }
+
+  // ---- Двери ----
+  if (are.doors && are.vertices) {
     ctx.strokeStyle = "#ff0";
     ctx.lineWidth = 2;
     for (const d of are.doors) {
@@ -104,8 +162,8 @@
     }
   }
 
-  // Акторы
-  if (document.getElementById("showActors").checked && are.actors) {
+  // ---- Акторы ----
+  if (are.actors) {
     ctx.fillStyle = "rgba(255,0,0,0.8)";
     for (const a of are.actors) {
       ctx.beginPath();
@@ -114,7 +172,93 @@
     }
   }
 
-  status.textContent = `Готово: ${W}×${H} (${tileCanvases.length} tiles, ${are.actors.length} actors)`;
+  status.textContent = `Готово: ${W}×${H} (${tileCanvases.length} tiles, ${waveCells.length} water, ${poolCells.length} pool, ${are.actors.length} actors)`;
+
+  // ---- Анимация overlay ----
+  let frame = 0;
+  let lastTime = 0;
+  const FRAME_MS = 1000 / 8;
+
+  function animate(time) {
+    if (time - lastTime >= FRAME_MS) {
+      lastTime = time;
+      for (const c of waveCells) {
+        drawOverlayCell(c.x, c.y, c.tile, wtwaveCanvases[frame % wtwaveCanvases.length]);
+      }
+      for (const c of poolCells) {
+        drawOverlayCell(c.x, c.y, c.tile, wtpoolCanvases[frame % wtpoolCanvases.length]);
+      }
+      frame++;
+    }
+    requestAnimationFrame(animate);
+  }
+  requestAnimationFrame(animate);
+
+  // ========================================
+  // Зум / панорама
+  // ========================================
+  const viewport = document.getElementById("viewport");
+  const zoomLabel = document.getElementById("zoomLabel");
+  let scale = 1, offsetX = 0, offsetY = 0;
+  let isDragging = false, dragStartX = 0, dragStartY = 0;
+
+  function applyTransform() {
+    canvas.style.transform = `translate(${offsetX}px, ${offsetY}px) scale(${scale})`;
+    zoomLabel.textContent = `${Math.round(scale * 100)}%`;
+  }
+  applyTransform();
+
+  // Колесо мыши — зум к курсору
+  viewport.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const rect = viewport.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+
+    const oldScale = scale;
+    const delta = -Math.sign(e.deltaY) * 0.15;
+    scale = Math.max(0.1, Math.min(8, scale + delta));
+
+    // зум относительно точки под курсором
+    offsetX = mx - (mx - offsetX) * (scale / oldScale);
+    offsetY = my - (my - offsetY) * (scale / oldScale);
+
+    applyTransform();
+  }, { passive: false });
+
+  // Панорама перетаскиванием
+  viewport.addEventListener("mousedown", (e) => {
+    isDragging = true;
+    dragStartX = e.clientX - offsetX;
+    dragStartY = e.clientY - offsetY;
+    viewport.classList.add("dragging");
+  });
+
+  window.addEventListener("mousemove", (e) => {
+    if (!isDragging) return;
+    offsetX = e.clientX - dragStartX;
+    offsetY = e.clientY - dragStartY;
+    applyTransform();
+  });
+
+  window.addEventListener("mouseup", () => {
+    isDragging = false;
+    viewport.classList.remove("dragging");
+  });
+
+  // Кнопки зума
+  document.getElementById("zoomIn").onclick = () => {
+    scale = Math.min(8, scale * 1.25);
+    applyTransform();
+  };
+  document.getElementById("zoomOut").onclick = () => {
+    scale = Math.max(0.1, scale / 1.25);
+    applyTransform();
+  };
+  document.getElementById("zoomReset").onclick = () => {
+    scale = 1; offsetX = 0; offsetY = 0;
+    applyTransform();
+  };
 })();
 </script>
 </body>
