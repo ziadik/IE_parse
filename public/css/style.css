@@ -1,0 +1,26 @@
+body { margin: 0; background: #111; color: #eee; font-family: monospace; }
+#status { padding: 8px; }
+#viewport {
+  position: relative;
+  width: 100vw;
+  height: calc(100vh - 60px);
+  overflow: hidden;
+  cursor: grab;
+  background: #000;
+  contain: strict;
+}
+#viewport.dragging { cursor: grabbing; }
+#layers {
+  position: absolute; top: 0; left: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+#layers canvas {
+  position: absolute; top: 0; left: 0;
+  image-rendering: pixelated;
+  pointer-events: none;
+}
+.toolbar { padding: 4px 8px; }
+label { margin-right: 12px; }
+button { padding: 4px 8px; margin-right: 4px; }
+#zoomLabel, #fpsLabel, #chunksLabel { margin-left: 12px; color: #aaa; }
