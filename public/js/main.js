@@ -14,6 +14,7 @@ import { initUI } from "./ui.js";
   const meta = await api.meta(state.area);
   initChunks(meta);
   initBase(meta);
+  
   initOverlay(meta);
   initUI(meta);
 
@@ -21,7 +22,8 @@ import { initUI } from "./ui.js";
   const are = await api.are(state.area);
 
   // UI layer: акторы + двери
-  initActors(are);
+  await initActors();
+  // initActors(are);
   initDoors(are, meta);
 
   // Зум/панорама

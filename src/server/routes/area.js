@@ -9,6 +9,39 @@ const { parseAreFile } = require("../../parsers/are");
 const { extractByType } = require("../../parsers/bif");
 const { extractFileFromSave } = require("../../parsers/sav");
 
+
+// GET /api/area/:name/actors
+router.get("/area/:name/actors", (req, res) => {
+  try {
+    const name = req.params.name.toUpperCase();
+    const file = path.join(CACHE_DIR, name, "actors.json");
+    if (!fs.existsSync(file))
+      return res.status(404).json({ error: "not ready" });
+    res.json(JSON.parse(fs.readFileSync(file, "utf8")));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/area/:name/actor-sprite/:file.png
+router.get("/area/:name/actor-sprite/:file", (req, res) => {
+  try {
+    const name = req.params.name.toUpperCase();
+    const file = path.join(
+      CACHE_DIR,
+      name,
+      "actors-preview",
+      "actors",
+      req.params.file,
+    );
+    if (!fs.existsSync(file)) return res.status(404).end();
+    res.setHeader("Content-Type", "image/png");
+    res.setHeader("Cache-Control", "public, max-age=3600");
+    res.sendFile(file);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 // meta.json
 router.get("/area/:name/meta", (req, res) => {
   const file = path.join(CACHE_DIR, req.params.name.toUpperCase(), "meta.json");

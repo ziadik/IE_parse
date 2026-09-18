@@ -1,20 +1,29 @@
 import { state } from "./state.js";
 
-export function initActors(are) {
+export async function initActors() {
   const canvas = document.getElementById("uiLayer");
+  const ctx = canvas.getContext("2d");
   canvas.width = state.meta.mapWidth;
   canvas.height = state.meta.mapHeight;
 
-  const ctx = canvas.getContext("2d");
-  ctx.imageSmoothingEnabled = false;
+  const actors = await (await fetch(`/api/area/${state.area}/actors`)).json();
+  console.log(`Акторов: ${actors.length}`);
 
-  // Точки акторов
-  if (are.actors) {
-    ctx.fillStyle = "rgba(255,0,0,0.8)";
-    for (const a of are.actors) {
-      ctx.beginPath();
-      ctx.arc(a.x, a.y, 4, 0, 2 * Math.PI);
-      ctx.fill();
-    }
-  }
+  const promises = actors.map((a, i) => {
+    if (!a.sprite) return Promise.resolve();
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        const dx = a.x - (a.spriteOffX || 0);
+        const dy = a.y - (a.spriteOffY || 0);
+        ctx.drawImage(img, dx, dy);
+        resolve();
+      };
+      img.onerror = resolve;
+      img.src = `/api/area/${state.area}/actor-sprite/${a.sprite.split("/").pop()}`;
+    });
+  });
+
+  await Promise.all(promises);
+  state.actors = actors;
 }

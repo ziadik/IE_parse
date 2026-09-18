@@ -8,6 +8,7 @@ const { parseAreFile } = require("../../parsers/are");
 const { extractFileFromSave } = require("../../parsers/sav");
 const { extractByType } = require("../../parsers/bif");
 const { prepareArea } = require("../../prep/prepare");
+const { prepareActors } = require("../../prep/actors");
 
 async function loadTisByName(resref) {
   const e = findTisEntry(resref);
@@ -22,7 +23,10 @@ async function bootstrapPrepare() {
   const areaName = "AR2600";
   const outDir = path.join(CACHE_DIR, areaName);
 
-  if (fs.existsSync(path.join(outDir, "meta.json"))) {
+  const metaExists = fs.existsSync(path.join(outDir, "meta.json"));
+  const actorsExists = fs.existsSync(path.join(outDir, "actors.json"));
+
+  if (metaExists && actorsExists) {
     console.log(`[CACHE] ${areaName} уже подготовлен`);
     return;
   }
@@ -37,16 +41,29 @@ async function bootstrapPrepare() {
   // TIS base
   const tis = await loadTisByName(areaName);
 
-  // ARE
-  const are = parseAreFile(
-    extractFileFromSave(path.join(SAVE_DIR, "BALDUR.SAV"), `${areaName}.ARE`),
+  // ARE (один раз!)
+  const areBuffer = extractFileFromSave(
+    path.join(SAVE_DIR, "BALDUR.SAV"),
+    `${areaName}.ARE`,
   );
+  const are = parseAreFile(areBuffer);
 
   // Overlay TIS
   const wtwave = await loadTisByName("WTWAVE");
   const wtpool = await loadTisByName("WTPOOL");
 
   await prepareArea({ wed, tis, are, wtwave, wtpool, outDir });
+
+  try {
+    const actorsOut = path.join(outDir, "actors-preview");
+    const actors = await prepareActors(areBuffer, are, actorsOut);
+    fs.writeFileSync(path.join(outDir, "actors.json"), JSON.stringify(actors));
+    console.log(`[PREP] actors: ${actors.length}`);
+  } catch (e) {
+    console.error(`[PREP] actors failed: ${e.message}`);
+    // Заглушка, чтобы не пересобирать вечно
+    fs.writeFileSync(path.join(outDir, "actors.json"), JSON.stringify([]));
+  }
 
   console.log(
     `[PREP] ${areaName} готов за ${((Date.now() - t0) / 1000).toFixed(1)} c`,
