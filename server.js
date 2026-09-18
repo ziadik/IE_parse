@@ -1,4 +1,5 @@
 const express = require("express");
+const compression = require("compression");
 const fs = require("fs");
 const path = require("path");
 
@@ -11,32 +12,124 @@ const { parseAreFile } = require("./src/parsers/are");
 const { parseGamFile } = require("./src/parsers/gam");
 const { extractFileFromSave, listSaveFiles } = require("./src/parsers/sav");
 
-const GAME_DIR = process.env.BG_DIR || "I:\\BG";
+const GAME_DIR = process.env.GAME_DIR || "I:\\BG";
 const SAVE_DIR = process.env.SAVE_DIR || "I:\\BG\\Save\\000000001-Quick-Save";
+const CACHE_DIR = path.join(__dirname, "cache");
 const PORT = 5173;
-const AREA = "AR2600";
+
+if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
 
 const app = express();
+app.use(compression());
 app.use(express.static(path.join(__dirname, "public")));
-
 process.on("uncaughtException", (e) => console.error("❌", e.message));
 
-// --- /api/save-info (BALDUR.GAM из папки save) ---
-app.get("/api/save-info", (req, res) => {
+// ---- кэш BIFF в памяти ----
+const biffCache = new Map();
+function getBiff(biffPath) {
+  if (!biffCache.has(biffPath)) {
+    console.log(`[CACHE] load BIF: ${path.basename(biffPath)}`);
+    biffCache.set(biffPath, parseBiffFile(biffPath));
+  }
+  return biffCache.get(biffPath);
+}
+
+// ---- кэш KEY ----
+let _key = null;
+function getKey() {
+  if (!_key) _key = parseKeyFile(path.join(GAME_DIR, "chitin.key"));
+  return _key;
+}
+
+// ---- поиск BIF по имени области: AR2600 → AREA2600.bif ----
+function areaBifName(area) {
+  return `AREA${area.substring(2)}.bif`;
+}
+
+// ---- TIS → бинарный буфер (заголовок + палитры + пиксели) ----
+function buildTisBuffer(resref) {
+  const key = getKey();
+  const e = key.entries.find(
+    (x) => x.resref.toUpperCase() === resref && x.type === 0x03eb,
+  );
+  if (!e) throw new Error(`${resref}.TIS не найден в KEY`);
+
+  const bifName = key.biffs[e.biffIndex].name;
+  const bifPath = path.join(GAME_DIR, bifName);
+  const biff = getBiff(bifPath);
+
+  const ts = biff.tilesets.find((t) => t.idx === e.tilesetIndex);
+  if (!ts) throw new Error(`tileset idx=${e.tilesetIndex} не найден`);
+
+  const total = 4 + ts.tileCount * (1024 + 4096);
+  const out = Buffer.alloc(total);
+  out.writeUInt32LE(ts.tileCount, 0);
+
+  let off = 4;
+  for (let i = 0; i < ts.tileCount; i++) {
+    const toff = ts.offset + i * ts.tileSize;
+    biff.buffer.copy(out, off, toff, toff + 1024);
+    off += 1024;
+    biff.buffer.copy(out, off, toff + 1024, toff + 1024 + 4096);
+    off += 4096;
+  }
+  return out;
+}
+
+// ---- /api/area/:name/tis → бинарный ответ + кэш на диск ----
+app.get("/api/area/:name/tis", (req, res) => {
   try {
-    const gam = parseGamFile(fs.readFileSync(path.join(SAVE_DIR, "BALDUR.GAM")));
-    res.json(gam);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+    const name = req.params.name.toUpperCase();
+    const cacheFile = path.join(CACHE_DIR, `${name}.tis.bin`);
+
+    if (fs.existsSync(cacheFile)) {
+      res.setHeader("Content-Type", "application/octet-stream");
+      res.sendFile(cacheFile);
+      return;
+    }
+
+    const out = buildTisBuffer(name);
+    fs.writeFileSync(cacheFile, out);
+    res.setHeader("Content-Type", "application/octet-stream");
+    res.send(out);
+  } catch (e) {
+    res.status(404).json({ error: e.message });
+  }
 });
 
-// --- /api/save/files ---
-app.get("/api/save/files", (req, res) => {
+// ---- /api/tis/:resref → то же для WTWAVE / WTPOOL ----
+app.get("/api/tis/:resref", (req, res) => {
   try {
-    res.json(listSaveFiles(path.join(SAVE_DIR, "BALDUR.SAV")));
-  } catch (e) { res.status(500).json({ error: e.message }); }
+    const resref = req.params.resref.toUpperCase();
+    const cacheFile = path.join(CACHE_DIR, `${resref}.tis.bin`);
+    if (fs.existsSync(cacheFile)) {
+      res.setHeader("Content-Type", "application/octet-stream");
+      res.sendFile(cacheFile);
+      return;
+    }
+    const out = buildTisBuffer(resref);
+    fs.writeFileSync(cacheFile, out);
+    res.setHeader("Content-Type", "application/octet-stream");
+    res.send(out);
+  } catch (e) {
+    res.status(404).json({ error: e.message });
+  }
 });
 
-// --- /api/area/:name (ARE из BALDUR.SAV) ---
+// ---- /api/area/:name/wed ----
+app.get("/api/area/:name/wed", (req, res) => {
+  try {
+    const name = req.params.name.toUpperCase();
+    const biff = getBiff(path.join(GAME_DIR, "data", areaBifName(name)));
+    const weds = extractByType(biff, 0x03e9);
+    if (!weds.length) throw new Error("WED не найден");
+    res.json(parseWedFile(weds[0].data));
+  } catch (e) {
+    res.status(404).json({ error: e.message });
+  }
+});
+
+// ---- /api/area/:name (ARE из сохранения) ----
 app.get("/api/area/:name", (req, res) => {
   try {
     const name = req.params.name.toUpperCase();
@@ -50,52 +143,33 @@ app.get("/api/area/:name", (req, res) => {
   }
 });
 
-// --- /api/area/:name/wed ---
-app.get("/api/area/:name/wed", (req, res) => {
+// ---- /api/save-info (GAM) ----
+app.get("/api/save-info", (req, res) => {
   try {
-    const name = req.params.name.toUpperCase();       // AR2600
-    const bifName = `AREA${name.substring(2)}.bif`;   // AREA2600.bif
-    const biff = parseBiffFile(path.join(GAME_DIR, "data", bifName));
-    const weds = extractByType(biff, 0x03e9);
-    if (!weds.length) throw new Error("WED не найден");
-    res.json(parseWedFile(weds[0].data));
-  } catch (e) { res.status(404).json({ error: e.message }); }
+    const gam = parseGamFile(
+      fs.readFileSync(path.join(SAVE_DIR, "BALDUR.GAM")),
+    );
+    res.json(gam);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-// --- /api/area/:name/tis ---
-app.get("/api/area/:name/tis", (req, res) => {
+// ---- /api/save/files ----
+app.get("/api/save/files", (req, res) => {
   try {
-    const name = req.params.name.toUpperCase();
-    const key = parseKeyFile(path.join(GAME_DIR, "chitin.key"));
-    const e = key.entries.find(x => x.resref.toUpperCase() === name && x.type === 0x03eb);
-    if (!e) throw new Error(`${name}.TIS не найден в KEY`);
-
-    const bifName = key.biffs[e.biffIndex].name;
-    const bifPath = path.join(GAME_DIR, bifName);
-    const biff = parseBiffFile(bifPath);
-
-    const ts = biff.tilesets.find(t => t.idx === e.tilesetIndex);
-    if (!ts) throw new Error(`tileset idx=${e.tilesetIndex} не найден в BIF`);
-
-    const tis = parseTisData(biff.buffer, ts.offset, ts.tileCount, ts.tileSize);
-
-    res.json({
-      tileCount: tis.tileCount,
-      tileSize: tis.tileSize,
-      tiles: tis.tiles.map(t => ({
-        palette: Buffer.from(t.palette).toString("base64"),
-        pixels:  t.pixels.toString("base64"),
-      })),
-    });
-  } catch (err) { res.status(404).json({ error: err.message }); }
+    res.json(listSaveFiles(path.join(SAVE_DIR, "BALDUR.SAV")));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-// --- /api/area/:name/bmp/:index.png ---
+// ---- /api/area/:name/bmp/:index.png ----
 app.get("/api/area/:name/bmp/:index.png", (req, res) => {
   try {
     const name = req.params.name.toUpperCase();
     const idx = Number(req.params.index);
-    const biff = parseBiffFile(path.join(GAME_DIR, "data", `AREA${name.substring(2)}.bif`));
+    const biff = getBiff(path.join(GAME_DIR, "data", areaBifName(name)));
     const bmps = extractByType(biff, 0x0001);
     const b = bmps[idx];
     if (!b) throw new Error(`BMP[${idx}] не найден`);
@@ -103,43 +177,25 @@ app.get("/api/area/:name/bmp/:index.png", (req, res) => {
     const rgba = Buffer.alloc(bmp.width * bmp.height * 4);
     for (let i = 0; i < bmp.pixels.length; i++) {
       const c = bmp.palette[bmp.pixels[i]];
-      rgba[i*4+0] = c.r; rgba[i*4+1] = c.g; rgba[i*4+2] = c.b; rgba[i*4+3] = c.a;
+      rgba[i * 4 + 0] = c.r;
+      rgba[i * 4 + 1] = c.g;
+      rgba[i * 4 + 2] = c.b;
+      rgba[i * 4 + 3] = c.a;
     }
-    res.json({ width: bmp.width, height: bmp.height, bpp: bmp.bpp, rgba: rgba.toString("base64") });
-  } catch (err) { res.status(404).json({ error: err.message }); }
-});
-// /api/tis/:resref — загрузить любой TIS по имени
-app.get("/api/tis/:resref", (req, res) => {
-  try {
-    const resref = req.params.resref.toUpperCase();
-    const key = parseKeyFile(path.join(GAME_DIR, "chitin.key"));
-    const e = key.entries.find(x => x.resref.toUpperCase() === resref && x.type === 0x03eb);
-    if (!e) throw new Error(`${resref}.TIS не найден`);
-
-    const bifName = key.biffs[e.biffIndex].name;
-    const biff = parseBiffFile(path.join(GAME_DIR, bifName));
-    const ts = biff.tilesets.find(t => t.idx === e.tilesetIndex);
-    if (!ts) throw new Error(`tileset idx=${e.tilesetIndex} не найден`);
-
-    const tis = parseTisData(biff.buffer, ts.offset, ts.tileCount, ts.tileSize);
-
     res.json({
-      tileCount: tis.tileCount,
-      tileSize: tis.tileSize,
-      tiles: tis.tiles.map(t => ({
-        palette: Buffer.from(t.palette).toString("base64"),
-        pixels:  t.pixels.toString("base64"),
-      })),
+      width: bmp.width,
+      height: bmp.height,
+      bpp: bmp.bpp,
+      rgba: rgba.toString("base64"),
     });
-  } catch (err) { res.status(404).json({ error: err.message }); }
+  } catch (err) {
+    res.status(404).json({ error: err.message });
+  }
 });
 
 app.listen(PORT, () => {
   console.log(`✅ http://localhost:${PORT}`);
-  console.log(`   /api/save-info`);
-  console.log(`   /api/save/files`);
-  console.log(`   /api/area/${AREA}`);
-  console.log(`   /api/area/${AREA}/wed`);
-  console.log(`   /api/area/${AREA}/tis`);
-  console.log(`   /api/area/${AREA}/bmp/0.png`);
+  console.log(`   GAME_DIR=${GAME_DIR}`);
+  console.log(`   SAVE_DIR=${SAVE_DIR}`);
+  console.log(`   CACHE_DIR=${CACHE_DIR}`);
 });
