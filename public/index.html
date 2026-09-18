@@ -1,302 +1,330 @@
 <!doctype html>
 <html>
-  <head>
-    <meta charset="utf-8" />
-    <title>AR2600</title>
-    <style>
-      body {
-        margin: 0;
-        background: #111;
-        color: #eee;
-        font-family: monospace;
-      }
-      #status {
-        padding: 8px;
-      }
-      #viewport {
-        position: relative;
-        width: 100vw;
-        height: calc(100vh - 60px);
-        overflow: hidden;
-        cursor: grab;
-        background: #000;
-        contain: strict;
-      }
-      #viewport.dragging {
-        cursor: grabbing;
-      }
-      #layers {
-        position: absolute;
-        top: 0;
-        left: 0;
-        transform-origin: 0 0;
-        will-change: transform;
-      }
-      #layers canvas {
-        position: absolute;
-        top: 0;
-        left: 0;
-        image-rendering: pixelated;
-        pointer-events: none;
-      }
-      .toolbar {
-        padding: 4px 8px;
-      }
-      label {
-        margin-right: 12px;
-      }
-      button {
-        padding: 4px 8px;
-        margin-right: 4px;
-      }
-      #zoomLabel,
-      #fpsLabel,
-      #chunksLabel {
-        margin-left: 12px;
-        color: #aaa;
-      }
-    </style>
-  </head>
-  <body>
-    <div id="status">Загрузка…</div>
-    <div class="toolbar">
-      <button id="zoomIn">+</button>
-      <button id="zoomOut">−</button>
-      <button id="zoomReset">Reset</button>
-      <span id="zoomLabel"></span>
-      <span id="fpsLabel"></span>
-      <span id="chunksLabel"></span>
+<head>
+  <meta charset="utf-8" />
+  <title>AR2600</title>
+  <style>
+    body { margin: 0; background: #111; color: #eee; font-family: monospace; }
+    #status { padding: 8px; }
+    #viewport {
+      position: relative;
+      width: 100vw;
+      height: calc(100vh - 60px);
+      overflow: hidden;
+      cursor: grab;
+      background: #000;
+      contain: strict;
+    }
+    #viewport.dragging { cursor: grabbing; }
+    #layers {
+      position: absolute; top: 0; left: 0;
+      transform-origin: 0 0;
+      will-change: transform;
+    }
+    #layers canvas {
+      position: absolute; top: 0; left: 0;
+      image-rendering: pixelated;
+      pointer-events: none;
+    }
+    .toolbar { padding: 4px 8px; }
+    label { margin-right: 12px; }
+    button { padding: 4px 8px; margin-right: 4px; }
+    #zoomLabel, #fpsLabel, #chunksLabel { margin-left: 12px; color: #aaa; }
+  </style>
+</head>
+<body>
+  <div id="status">Загрузка…</div>
+  <div class="toolbar">
+    <button id="zoomIn">+</button>
+    <button id="zoomOut">−</button>
+    <button id="zoomReset">Reset</button>
+    <label><input type="checkbox" id="showOverlay" checked /> Water</label>
+    <span id="zoomLabel"></span>
+    <span id="fpsLabel"></span>
+    <span id="chunksLabel"></span>
+  </div>
+  <div id="viewport">
+    <div id="layers">
+      <canvas id="baseLayer"></canvas>
+      <canvas id="overlayLayer"></canvas>
     </div>
-    <div id="viewport">
-      <div id="layers">
-        <canvas id="baseLayer"></canvas>
-      </div>
-    </div>
+  </div>
 
-    <script>
-      (async () => {
-        const area = "AR2600";
-        const CACHE_VERSION = "v2";
-        const status = document.getElementById("status");
-        const viewport = document.getElementById("viewport");
-        const layers = document.getElementById("layers");
-        const canvasBase = document.getElementById("baseLayer");
-        const ctxBase = canvasBase.getContext("2d");
-        ctxBase.imageSmoothingEnabled = false;
+<script>
+(async () => {
+  const area = "AR2600";
+  const status = document.getElementById("status");
+  const viewport = document.getElementById("viewport");
+  const layers = document.getElementById("layers");
 
-        let renderScheduled = false;
-        function scheduleRender() {
-          if (renderScheduled) return;
-          renderScheduled = true;
-          requestAnimationFrame(() => {
-            renderScheduled = false;
-            renderBase();
-          });
+  const canvasBase = document.getElementById("baseLayer");
+  const canvasOv   = document.getElementById("overlayLayer");
+  const ctxBase = canvasBase.getContext("2d");
+  const ctxOv   = canvasOv.getContext("2d");
+  ctxBase.imageSmoothingEnabled = false;
+  ctxOv.imageSmoothingEnabled = false;
+
+  let meta = null;
+  let CS = 0, COLS = 0, ROWS = 0;
+  let scale = 1, offsetX = 0, offsetY = 0;
+  let isDragging = false, dragStartX = 0, dragStartY = 0;
+  let renderScheduled = false;
+  let currentFrame = 0;
+
+  const zoomLabel   = document.getElementById("zoomLabel");
+  const fpsLabel    = document.getElementById("fpsLabel");
+  const chunksLabel = document.getElementById("chunksLabel");
+  const showOverlay = document.getElementById("showOverlay");
+
+  // Кэши
+  const chunkCache   = new Map();
+  const chunkLoading = new Map();
+  const ovCache      = new Map();   // null = нет чанка
+  const ovLoading    = new Map();
+  let waveSet = new Set();
+  let poolSet = new Set();
+
+  // ---------- Функции ----------
+  function scheduleRender() {
+    if (!meta) return;
+    if (renderScheduled) return;
+    renderScheduled = true;
+    requestAnimationFrame(() => {
+      renderScheduled = false;
+      renderBase();
+      renderOverlay();
+    });
+  }
+
+  function applyTransform() {
+    layers.style.transform = `translate(${offsetX}px, ${offsetY}px) scale(${scale})`;
+    zoomLabel.textContent = `${Math.round(scale * 100)}%`;
+    scheduleRender();
+  }
+
+  function getVisibleRange() {
+    const vw = viewport.clientWidth;
+    const vh = viewport.clientHeight;
+    const viewLeft   = -offsetX / scale;
+    const viewTop    = -offsetY / scale;
+    const viewRight  = viewLeft + vw / scale;
+    const viewBottom = viewTop  + vh / scale;
+
+    const cx0 = Math.max(0, Math.floor(viewLeft / CS) - 1);
+    const cy0 = Math.max(0, Math.floor(viewTop  / CS) - 1);
+    const cx1 = Math.min(COLS - 1, Math.floor(viewRight  / CS) + 1);
+    const cy1 = Math.min(ROWS - 1, Math.floor(viewBottom / CS) + 1);
+    return { cx0, cy0, cx1, cy1 };
+  }
+
+  async function loadChunk(cx, cy) {
+    const key = `${cx}_${cy}`;
+    if (chunkCache.has(key)) return chunkCache.get(key);
+    if (chunkLoading.has(key)) return chunkLoading.get(key);
+
+    const p = (async () => {
+      const url = `/api/area/${area}/chunk/base/${cx}_${cy}.webp?v=${meta.cacheVersion}`;
+      const r = await fetch(url);
+      if (!r.ok) { chunkCache.set(key, null); return null; }
+      const bm = await createImageBitmap(await r.blob());
+      chunkCache.set(key, bm);
+      return bm;
+    })();
+
+    chunkLoading.set(key, p);
+    const result = await p;
+    chunkLoading.delete(key);
+    return result;
+  }
+
+  async function loadOvChunk(kind, cx, cy) {
+    const key = `${kind}_${cx}_${cy}`;
+    if (ovCache.has(key)) return ovCache.get(key);
+    if (ovLoading.has(key)) return ovLoading.get(key);
+
+    const p = (async () => {
+      const url = `/api/area/${area}/chunk/overlay/${kind}_${cx}_${cy}.webp?v=${meta.cacheVersion}`;
+      const r = await fetch(url);
+      if (!r.ok) { ovCache.set(key, null); return null; }
+      const bm = await createImageBitmap(await r.blob());
+      ovCache.set(key, bm);
+      return bm;
+    })();
+
+    ovLoading.set(key, p);
+    const result = await p;
+    ovLoading.delete(key);
+    return result;
+  }
+
+  async function renderBase() {
+    if (!meta) return;
+    const { cx0, cy0, cx1, cy1 } = getVisibleRange();
+
+    const promises = [];
+    for (let cy = cy0; cy <= cy1; cy++) {
+      for (let cx = cx0; cx <= cx1; cx++) {
+        promises.push(loadChunk(cx, cy));
+      }
+    }
+    await Promise.all(promises);
+
+    ctxBase.clearRect(0, 0, canvasBase.width, canvasBase.height);
+    for (let cy = cy0; cy <= cy1; cy++) {
+      for (let cx = cx0; cx <= cx1; cx++) {
+        const bm = chunkCache.get(`${cx}_${cy}`);
+        if (bm) ctxBase.drawImage(bm, cx * CS, cy * CS);
+      }
+    }
+
+    chunksLabel.textContent = `${chunkCache.size} chunks`;
+    scheduleUnload();
+  }
+
+  async function renderOverlay() {
+    if (!meta) return;
+    ctxOv.clearRect(0, 0, canvasOv.width, canvasOv.height);
+
+    if (!showOverlay.checked) return;
+    const { cx0, cy0, cx1, cy1 } = getVisibleRange();
+
+    const promises = [];
+    for (let cy = cy0; cy <= cy1; cy++) {
+      for (let cx = cx0; cx <= cx1; cx++) {
+        const key = `${cx}_${cy}`;
+        if (waveSet.has(key)) promises.push(loadOvChunk("wave", cx, cy));
+        if (poolSet.has(key)) promises.push(loadOvChunk("pool", cx, cy));
+      }
+    }
+    await Promise.all(promises);
+
+    const frameX = currentFrame * CS;
+    for (let cy = cy0; cy <= cy1; cy++) {
+      for (let cx = cx0; cx <= cx1; cx++) {
+        const key = `${cx}_${cy}`;
+        if (waveSet.has(key)) {
+          const bm = ovCache.get(`wave_${key}`);
+          if (bm) ctxOv.drawImage(bm, frameX, 0, CS, CS, cx*CS, cy*CS, CS, CS);
         }
-        // ---- 1. meta ----
-        status.textContent = "meta…";
-        const meta = await (await fetch(`/api/area/${area}/meta`)).json();
-        console.log("meta:", meta);
-
-        canvasBase.width = meta.mapWidth;
-        canvasBase.height = meta.mapHeight;
-
-        const CS = meta.chunkSize;
-        const COLS = meta.chunkCols;
-        const ROWS = meta.chunkRows;
-
-        // ---- 2. кэш чанков ----
-        const chunkCache = new Map(); // "cx_cy" → ImageBitmap
-        const chunkLoading = new Map(); // "cx_cy" → Promise
-
-        async function loadChunk(cx, cy) {
-          const key = `${cx}_${cy}`;
-          if (chunkCache.has(key)) return chunkCache.get(key);
-          if (chunkLoading.has(key)) return chunkLoading.get(key);
-
-          const p = (async () => {
-            // const url = `/api/area/${area}/chunk/base/${cx}/${cy}`;
-            const url = `/api/area/${area}/chunk/base/${cx}/${cy}?v=${CACHE_VERSION}`;
-            const r = await fetch(url);
-            if (!r.ok) return null;
-            const blob = await r.blob();
-            const bitmap = await createImageBitmap(blob);
-            chunkCache.set(key, bitmap);
-            return bitmap;
-          })();
-
-          chunkLoading.set(key, p);
-          return p;
+        if (poolSet.has(key)) {
+          const bm = ovCache.get(`pool_${key}`);
+          if (bm) ctxOv.drawImage(bm, frameX, 0, CS, CS, cx*CS, cy*CS, CS, CS);
         }
+      }
+    }
+  }
 
-        // ---- 3. зум/панорама ----
-        const zoomLabel = document.getElementById("zoomLabel");
-        const fpsLabel = document.getElementById("fpsLabel");
-        const chunksLabel = document.getElementById("chunksLabel");
-        let scale = 1,
-          offsetX = 0,
-          offsetY = 0;
-        let isDragging = false,
-          dragStartX = 0,
-          dragStartY = 0;
+  let unloadTimer = null;
+  function scheduleUnload() {
+    if (unloadTimer) return;
+    unloadTimer = setTimeout(unloadFarChunks, 5000);
+  }
+  function unloadFarChunks() {
+    unloadTimer = null;
+    if (!meta) return;
+    const { cx0, cy0, cx1, cy1 } = getVisibleRange();
+    const PAD = 2;
 
-        function applyTransform() {
-          layers.style.transform = `translate(${offsetX}px, ${offsetY}px) scale(${scale})`;
-          zoomLabel.textContent = `${Math.round(scale * 100)}%`;
-          scheduleRender();
-        }
-        applyTransform();
+    for (const [key, bm] of chunkCache) {
+      const [cx, cy] = key.split("_").map(Number);
+      if (cx < cx0 - PAD || cx > cx1 + PAD || cy < cy0 - PAD || cy > cy1 + PAD) {
+        if (bm) bm.close();
+        chunkCache.delete(key);
+      }
+    }
+    for (const [key, bm] of ovCache) {
+      const [, cx, cy] = key.split("_").map(Number);
+      if (cx < cx0 - PAD || cx > cx1 + PAD || cy < cy0 - PAD || cy > cy1 + PAD) {
+        if (bm) bm.close();
+        ovCache.delete(key);
+      }
+    }
+  }
 
-        viewport.addEventListener(
-          "wheel",
-          (e) => {
-            e.preventDefault();
-            const rect = viewport.getBoundingClientRect();
-            const mx = e.clientX - rect.left;
-            const my = e.clientY - rect.top;
-            const oldScale = scale;
-            const delta = -Math.sign(e.deltaY) * 0.15;
-            scale = Math.max(0.1, Math.min(8, scale + delta));
-            offsetX = mx - (mx - offsetX) * (scale / oldScale);
-            offsetY = my - (my - offsetY) * (scale / oldScale);
-            applyTransform();
-          },
-          { passive: false },
-        );
+  // ---------- Старт ----------
+  status.textContent = "meta…";
+  meta = await (await fetch(`/api/area/${area}/meta`)).json();
+  console.log("meta:", meta);
 
-        viewport.addEventListener("mousedown", (e) => {
-          isDragging = true;
-          dragStartX = e.clientX - offsetX;
-          dragStartY = e.clientY - offsetY;
-          viewport.classList.add("dragging");
-        });
-        window.addEventListener("mousemove", (e) => {
-          if (!isDragging) return;
-          offsetX = e.clientX - dragStartX;
-          offsetY = e.clientY - dragStartY;
-          applyTransform();
-        });
-        window.addEventListener("mouseup", () => {
-          isDragging = false;
-          viewport.classList.remove("dragging");
-        });
+  CS = meta.chunkSize;
+  COLS = meta.chunkCols;
+  ROWS = meta.chunkRows;
 
-        document.getElementById("zoomIn").onclick = () => {
-          scale = Math.min(8, scale * 1.25);
-          applyTransform();
-        };
-        document.getElementById("zoomOut").onclick = () => {
-          scale = Math.max(0.1, scale / 1.25);
-          applyTransform();
-        };
-        document.getElementById("zoomReset").onclick = () => {
-          scale = 1;
-          offsetX = 0;
-          offsetY = 0;
-          applyTransform();
-        };
+  canvasBase.width = canvasOv.width = meta.mapWidth;
+  canvasBase.height = canvasOv.height = meta.mapHeight;
 
-        // ---- 4. видимые чанки ----
-        function getVisibleRange() {
-          const vw = viewport.clientWidth;
-          const vh = viewport.clientHeight;
-          const viewLeft = -offsetX / scale;
-          const viewTop = -offsetY / scale;
-          const viewRight = viewLeft + vw / scale;
-          const viewBottom = viewTop + vh / scale;
+  waveSet = new Set(meta.overlays?.wave?.chunks || []);
+  poolSet = new Set(meta.overlays?.pool?.chunks || []);
+  console.log("wave chunks:", waveSet.size, "pool chunks:", poolSet.size);
 
-          const cx0 = Math.max(0, Math.floor(viewLeft / CS) - 1);
-          const cy0 = Math.max(0, Math.floor(viewTop / CS) - 1);
-          const cx1 = Math.min(COLS - 1, Math.floor(viewRight / CS) + 1);
-          const cy1 = Math.min(ROWS - 1, Math.floor(viewBottom / CS) + 1);
-          return {
-            cx0,
-            cy0,
-            cx1,
-            cy1,
-            viewLeft,
-            viewTop,
-            viewRight,
-            viewBottom,
-          };
-        }
+  // Зум/панорама
+  viewport.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const rect = viewport.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const oldScale = scale;
+    const delta = -Math.sign(e.deltaY) * 0.15;
+    scale = Math.max(0.1, Math.min(8, scale + delta));
+    offsetX = mx - (mx - offsetX) * (scale / oldScale);
+    offsetY = my - (my - offsetY) * (scale / oldScale);
+    applyTransform();
+  }, { passive: false });
 
-       
+  viewport.addEventListener("mousedown", (e) => {
+    isDragging = true;
+    dragStartX = e.clientX - offsetX;
+    dragStartY = e.clientY - offsetY;
+    viewport.classList.add("dragging");
+  });
+  window.addEventListener("mousemove", (e) => {
+    if (!isDragging) return;
+    offsetX = e.clientX - dragStartX;
+    offsetY = e.clientY - dragStartY;
+    applyTransform();
+  });
+  window.addEventListener("mouseup", () => {
+    isDragging = false;
+    viewport.classList.remove("dragging");
+  });
 
-        async function renderBase() {
-          renderScheduled = false;
-          const { cx0, cy0, cx1, cy1 } = getVisibleRange();
+  document.getElementById("zoomIn").onclick = () => { scale = Math.min(8, scale * 1.25); applyTransform(); };
+  document.getElementById("zoomOut").onclick = () => { scale = Math.max(0.1, scale / 1.25); applyTransform(); };
+  document.getElementById("zoomReset").onclick = () => { scale = 1; offsetX = 0; offsetY = 0; applyTransform(); };
+  showOverlay.addEventListener("change", () => renderOverlay());
 
-          // Загружаем недостающие параллельно
-          const promises = [];
-          for (let cy = cy0; cy <= cy1; cy++) {
-            for (let cx = cx0; cx <= cx1; cx++) {
-              promises.push(loadChunk(cx, cy));
-            }
-          }
-          await Promise.all(promises);
+  // Анимация overlay
+  let lastFrameTime = 0;
+  const FRAME_MS = 1000 / 10;
+  function animate(time) {
+    if (time - lastFrameTime >= FRAME_MS) {
+      lastFrameTime = time;
+      currentFrame = (currentFrame + 1) % 6;
+      renderOverlay();
+    }
+    requestAnimationFrame(animate);
+  }
+  requestAnimationFrame(animate);
 
-          // Рисуем
-          ctxBase.clearRect(0, 0, canvasBase.width, canvasBase.height);
-          for (let cy = cy0; cy <= cy1; cy++) {
-            for (let cx = cx0; cx <= cx1; cx++) {
-              const bitmap = chunkCache.get(`${cx}_${cy}`);
-              if (bitmap) {
-                ctxBase.drawImage(bitmap, cx * CS, cy * CS);
-              }
-            }
-          }
+  // FPS
+  let frames = 0, fpsAcc = 0, fpsLast = performance.now();
+  function fpsTick() {
+    const now = performance.now();
+    frames++;
+    fpsAcc += now - fpsLast;
+    fpsLast = now;
+    if (fpsAcc > 500) {
+      fpsLabel.textContent = `${(1000 / (fpsAcc / frames)).toFixed(0)} fps`;
+      frames = 0; fpsAcc = 0;
+    }
+    requestAnimationFrame(fpsTick);
+  }
+  requestAnimationFrame(fpsTick);
 
-          chunksLabel.textContent = `${chunkCache.size} chunks`;
-          scheduleUnload();
-        }
-
-        // ---- 6. выгрузка дальних чанков ----
-        let unloadTimer = null;
-        function scheduleUnload() {
-          if (unloadTimer) return;
-          unloadTimer = setTimeout(unloadFarChunks, 5000);
-        }
-        function unloadFarChunks() {
-          unloadTimer = null;
-          const { cx0, cy0, cx1, cy1 } = getVisibleRange();
-          const PAD = 2;
-          for (const [key, bitmap] of chunkCache) {
-            const [cx, cy] = key.split("_").map(Number);
-            if (
-              cx < cx0 - PAD ||
-              cx > cx1 + PAD ||
-              cy < cy0 - PAD ||
-              cy > cy1 + PAD
-            ) {
-              bitmap.close();
-              chunkCache.delete(key);
-            }
-          }
-        }
-
-        // ---- 7. FPS ----
-        let frames = 0,
-          fpsAcc = 0,
-          fpsLast = performance.now();
-        function fpsTick() {
-          const now = performance.now();
-          frames++;
-          fpsAcc += now - fpsLast;
-          fpsLast = now;
-          if (fpsAcc > 500) {
-            fpsLabel.textContent = `${(1000 / (fpsAcc / frames)).toFixed(0)} fps`;
-            frames = 0;
-            fpsAcc = 0;
-          }
-          requestAnimationFrame(fpsTick);
-        }
-        requestAnimationFrame(fpsTick);
-
-        // ---- 8. старт ----
-        await renderBase();
-        status.textContent = `Готово: ${meta.width}×${meta.height} тайлов, ${COLS}×${ROWS} чанков`;
-      })();
-    </script>
-  </body>
+  await renderBase();
+  await renderOverlay();
+  status.textContent = `Готово: ${meta.width}×${meta.height} тайлов, ${COLS}×${ROWS} чанков, wave=${waveSet.size}, pool=${poolSet.size}`;
+})();
+</script>
+</body>
 </html>

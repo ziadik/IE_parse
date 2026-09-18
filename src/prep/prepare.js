@@ -1,23 +1,14 @@
-// src/prep/prepare.js
-// Преобразует BG1 WED + TIS + ARE в чанки WebP + meta.json
-
 const fs = require("fs");
 const path = require("path");
 const sharp = require("sharp");
 
-const CHUNK_PX = 1024; // размер чанка в пикселях
+const CHUNK_PX = 1024;
 const TILE_PX = 64;
+const FRAMES = 6;
 
-/**
- * Подготавливает область: генерит meta.json и базовые чанки.
- *
- * wed     — результат parseWedFile
- * tis     — результат parseTisData (tiles с palette/pixels)
- * are     — результат parseAreFile
- * outDir  — куда писать (например, cache/AR2600)
- */
-async function prepareArea(wed, tis, are, outDir) {
+async function prepareArea(wed, tis, are, outDir, wtwaveTiles, wtpoolTiles) {
   fs.mkdirSync(path.join(outDir, "base"), { recursive: true });
+  fs.mkdirSync(path.join(outDir, "overlay"), { recursive: true });
 
   const base = wed.overlays[0];
   const W = base.width;
@@ -31,18 +22,52 @@ async function prepareArea(wed, tis, are, outDir) {
     `[PREP] ${W}×${H} тайлов, ${MAP_W}×${MAP_H} px, чанки: ${cols}×${rows}`,
   );
 
-  // 1. Декодируем все тайлы в RGBA буферы (по 64×64×4 байт)
+  // Декодируем все тайлы
   console.log(`[PREP] декодирование ${tis.tiles.length} тайлов...`);
-  const tileRGBA = tis.tiles.map((t) => decodeTileToRGBA(t));
+  const tileRGBA = tis.tiles.map(decodeTileToRGBA);
 
-  // 2. Собираем каждый чанк
+  // Base чанки
   for (let cy = 0; cy < rows; cy++) {
     for (let cx = 0; cx < cols; cx++) {
-      await buildBaseChunk(cx, cy, cols, rows, base, tileRGBA, W, H, outDir);
+      await buildBaseChunk(cx, cy, base, tileRGBA, W, H, outDir);
     }
   }
 
-  // 3. meta.json
+  // Overlay чанки
+  console.log(`[PREP] overlay chunks...`);
+  const waveChunks = [];
+  const poolChunks = [];
+
+  for (let cy = 0; cy < rows; cy++) {
+    for (let cx = 0; cx < cols; cx++) {
+      await buildOverlayChunk(
+        "wave",
+        cx,
+        cy,
+        base,
+        tileRGBA,
+        W,
+        H,
+        outDir,
+        wtwaveTiles,
+        waveChunks,
+      );
+      await buildOverlayChunk(
+        "pool",
+        cx,
+        cy,
+        base,
+        tileRGBA,
+        W,
+        H,
+        outDir,
+        wtpoolTiles,
+        poolChunks,
+      );
+    }
+  }
+
+  // meta.json
   const meta = {
     area: path.basename(outDir),
     width: W,
@@ -58,43 +83,33 @@ async function prepareArea(wed, tis, are, outDir) {
     actors: are.actors,
     vertices: are.vertices,
     overlays: {
-      wave: { present: false }, // заполним позже
-      pool: { present: false },
+      wave: {
+        present: waveChunks.length > 0,
+        frames: FRAMES,
+        chunks: waveChunks,
+      },
+      pool: {
+        present: poolChunks.length > 0,
+        frames: FRAMES,
+        chunks: poolChunks,
+      },
     },
     builtAt: new Date().toISOString(),
   };
 
-  // 4. Отдельно — информация об overlay-ячейках (пока просто список)
-  const waveCells = [];
-  const poolCells = [];
-  for (let y = 0; y < H; y++) {
-    for (let x = 0; x < W; x++) {
-      const t = base.tilemap[y * W + x];
-      if (!t) continue;
-      if (t.overlayFlags & 2) waveCells.push({ x, y, baseIdx: t.indices[0] });
-      else if (t.overlayFlags & 4)
-        poolCells.push({ x, y, baseIdx: t.indices[0] });
-    }
-  }
-  meta.overlays.wave.present = waveCells.length > 0;
-  meta.overlays.wave.cells = waveCells;
-  meta.overlays.pool.present = poolCells.length > 0;
-  meta.overlays.pool.cells = poolCells;
-
   fs.writeFileSync(path.join(outDir, "meta.json"), JSON.stringify(meta));
   console.log(`[PREP] готово: ${outDir}`);
+  console.log(`  base chunks: ${cols * rows}`);
+  console.log(`  wave chunks: ${waveChunks.length}`);
+  console.log(`  pool chunks: ${poolChunks.length}`);
 }
 
-/**
- * Декодирует BG1 тайл (palette BGRA + pixels 4096) в RGBA Uint8Array.
- * Возвращает Uint8ClampedArray 64×64×4.
- */
 function decodeTileToRGBA(t) {
-  const pal = t.palette; // Uint8Array, 256×3 = RGB
-  const pix = t.pixels; // Uint8Array, 4096 индексов
+  const pal = t.palette;
+  const pix = t.pixels;
   const out = new Uint8ClampedArray(TILE_PX * TILE_PX * 4);
   for (let i = 0; i < TILE_PX * TILE_PX; i++) {
-    const idx = pix[i] * 3; // ← * 3, не * 4
+    const idx = pix[i] * 3;
     const r = pal[idx],
       g = pal[idx + 1],
       b = pal[idx + 2];
@@ -110,36 +125,18 @@ function decodeTileToRGBA(t) {
   return out;
 }
 
-/**
- * Собирает один базовый чанк (cx, cy) и сохраняет в WebP.
- */
-async function buildBaseChunk(
-  cx,
-  cy,
-  cols,
-  rows,
-  base,
-  tileRGBA,
-  W,
-  H,
-  outDir,
-) {
+async function buildBaseChunk(cx, cy, base, tileRGBA, W, H, outDir) {
   const px0 = cx * CHUNK_PX;
   const py0 = cy * CHUNK_PX;
-
-  // Сколько пикселей реально в этом чанке (последний может быть меньше)
   const chunkW = Math.min(CHUNK_PX, base.width * TILE_PX - px0);
   const chunkH = Math.min(CHUNK_PX, base.height * TILE_PX - py0);
 
-  // Создаём буфер чанка RGBA
   const buf = Buffer.alloc(chunkW * chunkH * 4, 0);
-
-  // Сколько тайлов в чанке по X и Y
-  const tilesX = Math.ceil(chunkW / TILE_PX);
-  const tilesY = Math.ceil(chunkH / TILE_PX);
 
   const startTileX = Math.floor(px0 / TILE_PX);
   const startTileY = Math.floor(py0 / TILE_PX);
+  const tilesX = Math.ceil(chunkW / TILE_PX);
+  const tilesY = Math.ceil(chunkH / TILE_PX);
 
   for (let ty = 0; ty < tilesY; ty++) {
     for (let tx = 0; tx < tilesX; tx++) {
@@ -152,35 +149,106 @@ async function buildBaseChunk(
       const tileIdx = cell.indices[0];
       if (tileIdx >= tileRGBA.length) continue;
 
-      // Куда рисовать в чанке
       const dstX = mapX * TILE_PX - px0;
       const dstY = mapY * TILE_PX - py0;
       const tile = tileRGBA[tileIdx];
 
-      // Копируем пиксель-за-пикселем (можно оптимизировать)
       for (let y = 0; y < TILE_PX; y++) {
-        const dstRow = (dstY + y) * chunkW * 4 + dstX * 4;
-        const srcRow = y * TILE_PX * 4;
-        tile.copy
-          ? Buffer.from(
-              tile.buffer,
-              tile.byteOffset + srcRow,
-              TILE_PX * 4,
-            ).copy(buf, dstRow)
-          : buf.set(tile.subarray(srcRow, srcRow + TILE_PX * 4), dstRow);
+        const dstRowStart = ((dstY + y) * chunkW + dstX) * 4;
+        const srcRowStart = y * TILE_PX * 4;
+        for (let i = 0; i < TILE_PX * 4; i++) {
+          buf[dstRowStart + i] = tile[srcRowStart + i];
+        }
       }
     }
   }
 
-  // Сохраняем в WebP
   const outPath = path.join(outDir, "base", `${cx}_${cy}.webp`);
-  await sharp(buf, {
-    raw: { width: chunkW, height: chunkH, channels: 4 },
-  })
+  await sharp(buf, { raw: { width: chunkW, height: chunkH, channels: 4 } })
     .webp({ quality: 90, effort: 4 })
     .toFile(outPath);
 
   console.log(`  base/${cx}_${cy}.webp (${chunkW}×${chunkH})`);
+}
+
+async function buildOverlayChunk(
+  kind,
+  cx,
+  cy,
+  base,
+  tileRGBA,
+  W,
+  H,
+  outDir,
+  overlayTiles,
+  outChunks,
+) {
+  const px0 = cx * CHUNK_PX;
+  const py0 = cy * CHUNK_PX;
+  const chunkW = Math.min(CHUNK_PX, base.width * TILE_PX - px0);
+  const chunkH = Math.min(CHUNK_PX, base.height * TILE_PX - py0);
+
+  const totalW = FRAMES * chunkW;
+  const sheet = Buffer.alloc(totalW * chunkH * 4, 0);
+
+  let anyCell = false;
+
+  const startTileX = Math.floor(px0 / TILE_PX);
+  const startTileY = Math.floor(py0 / TILE_PX);
+  const tilesX = Math.ceil(chunkW / TILE_PX);
+  const tilesY = Math.ceil(chunkH / TILE_PX);
+
+  const overlayRGBA = overlayTiles.map(decodeTileToRGBA);
+
+  for (let ty = 0; ty < tilesY; ty++) {
+    for (let tx = 0; tx < tilesX; tx++) {
+      const mapX = startTileX + tx;
+      const mapY = startTileY + ty;
+      if (mapX >= W || mapY >= H) continue;
+
+      const cell = base.tilemap[mapY * W + mapX];
+      if (!cell) continue;
+      const isWave = !!(cell.overlayFlags & 2);
+      const isPool = !!(cell.overlayFlags & 4);
+      if (kind === "wave" && !isWave) continue;
+      if (kind === "pool" && !isPool) continue;
+
+      anyCell = true;
+
+      const baseTile = tileRGBA[cell.indices[0]];
+      const dstX = mapX * TILE_PX - px0;
+      const dstY = mapY * TILE_PX - py0;
+
+      for (let f = 0; f < FRAMES; f++) {
+        const overlay = overlayRGBA[f % overlayRGBA.length];
+        const frameX = f * chunkW + dstX;
+
+        for (let y = 0; y < TILE_PX; y++) {
+          const dstRowStart = ((dstY + y) * totalW + frameX) * 4;
+          const srcRowStart = y * TILE_PX * 4;
+          for (let i = 0; i < TILE_PX * 4; i += 4) {
+            const a = baseTile[srcRowStart + i + 3];
+            if (a === 0) {
+              sheet[dstRowStart + i + 0] = overlay[srcRowStart + i + 0];
+              sheet[dstRowStart + i + 1] = overlay[srcRowStart + i + 1];
+              sheet[dstRowStart + i + 2] = overlay[srcRowStart + i + 2];
+              sheet[dstRowStart + i + 3] = 255;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (!anyCell) return;
+
+  const outPath = path.join(outDir, "overlay", `${kind}_${cx}_${cy}.webp`);
+  await sharp(sheet, { raw: { width: totalW, height: chunkH, channels: 4 } })
+    .webp({ quality: 90, effort: 4 })
+    .toFile(outPath);
+
+  outChunks.push(`${cx}_${cy}`);
+  console.log(`  overlay/${kind}_${cx}_${cy}.webp`);
 }
 
 module.exports = { prepareArea };

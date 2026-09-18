@@ -17,7 +17,7 @@ const GAME_DIR = process.env.GAME_DIR || "I:\\BG";
 const SAVE_DIR = process.env.SAVE_DIR || "I:\\BG\\Save\\000000001-Quick-Save";
 const CACHE_DIR = path.join(__dirname, "cache");
 const PORT = 5173;
-const CACHE_VERSION = "v2";
+const CACHE_VERSION = "v1.0.2";
 
 if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
 
@@ -195,6 +195,17 @@ app.get("/api/area/:name/bmp/:index.png", (req, res) => {
   }
 });
 
+async function loadTisByName(resref) {
+  const key = getKey();
+  const e = key.entries.find(
+    (x) => x.resref.toUpperCase() === resref && x.type === 0x03eb,
+  );
+  if (!e) throw new Error(`${resref}.TIS не найден`);
+  const bif = getBiff(path.join(GAME_DIR, key.biffs[e.biffIndex].name));
+  const ts = bif.tilesets.find((t) => t.idx === e.tilesetIndex);
+  return parseTisData(bif.buffer, ts.offset, ts.tileCount, ts.tileSize);
+}
+
 async function bootstrapPrepare() {
   const areaName = "AR2600";
   const outDir = path.join(CACHE_DIR, areaName);
@@ -227,7 +238,10 @@ async function bootstrapPrepare() {
     extractFileFromSave(path.join(SAVE_DIR, "BALDUR.SAV"), `${areaName}.ARE`),
   );
 
-  await prepareArea(wed, tis, are, outDir);
+  const wtwave = await loadTisByName("WTWAVE");
+  const wtpool = await loadTisByName("WTPOOL");
+
+  await prepareArea(wed, tis, are, outDir, wtwave.tiles, wtpool.tiles);
 
   console.log(
     `[PREP] ${areaName} готов за ${((Date.now() - t0) / 1000).toFixed(1)} c`,
@@ -238,23 +252,21 @@ async function bootstrapPrepare() {
 app.get("/api/area/:name/meta", (req, res) => {
   const file = path.join(CACHE_DIR, req.params.name.toUpperCase(), "meta.json");
   if (!fs.existsSync(file)) return res.status(404).json({ error: "not ready" });
-  res.setHeader("Cache-Control", "public, max-age=3600");
-  res.sendFile(file);
+
+  const meta = JSON.parse(fs.readFileSync(file, "utf8"));
+  meta.cacheVersion = CACHE_VERSION;
+  res.setHeader("Cache-Control", "public, max-age=60");
+  res.json(meta);
 });
 
 // ---- Отдача чанка ----
-app.get("/api/area/:name/chunk/:kind/:cx/:cy", (req, res) => {
-  const { name, kind, cx, cy } = req.params;
-  const file = path.join(
-    CACHE_DIR,
-    name.toUpperCase(),
-    kind,
-    `${cx}_${cy}.webp`,
-  );
-  if (!fs.existsSync(file)) return res.status(404).end();
+app.get("/api/area/:name/chunk/:kind/:file", (req, res) => {
+  const { name, kind, file } = req.params;
+  const path0 = path.join(CACHE_DIR, name.toUpperCase(), kind, file);
+  if (!fs.existsSync(path0)) return res.status(404).end();
   res.setHeader("Content-Type", "image/webp");
   res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
-  res.sendFile(file);
+  res.sendFile(path0);
 });
 
 // ---- Старт ----
