@@ -3,6 +3,7 @@ const compression = require("compression");
 const fs = require("fs");
 const path = require("path");
 
+const { prepareArea } = require("./src/prep/prepare");
 const { parseKeyFile } = require("./src/parsers/key");
 const { parseBiffFile, extractByType } = require("./src/parsers/bif");
 const { parseWedFile } = require("./src/parsers/wed");
@@ -16,6 +17,7 @@ const GAME_DIR = process.env.GAME_DIR || "I:\\BG";
 const SAVE_DIR = process.env.SAVE_DIR || "I:\\BG\\Save\\000000001-Quick-Save";
 const CACHE_DIR = path.join(__dirname, "cache");
 const PORT = 5173;
+const CACHE_VERSION = "v2";
 
 if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
 
@@ -193,9 +195,70 @@ app.get("/api/area/:name/bmp/:index.png", (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
+async function bootstrapPrepare() {
+  const areaName = "AR2600";
+  const outDir = path.join(CACHE_DIR, areaName);
+
+  if (fs.existsSync(path.join(outDir, "meta.json"))) {
+    console.log(`[CACHE] ${areaName} уже подготовлен`);
+    return;
+  }
+
+  console.log(`[PREP] подготовка ${areaName}...`);
+  const t0 = Date.now();
+
+  const biff = getBiff(path.join(GAME_DIR, "data", areaBifName(areaName)));
+  const wed = parseWedFile(extractByType(biff, 0x03e9)[0].data);
+
+  const key = getKey();
+  const e = key.entries.find(
+    (x) => x.resref.toUpperCase() === areaName && x.type === 0x03eb,
+  );
+  const tisBiff = getBiff(path.join(GAME_DIR, key.biffs[e.biffIndex].name));
+  const ts = tisBiff.tilesets.find((t) => t.idx === e.tilesetIndex);
+  const tis = parseTisData(
+    tisBiff.buffer,
+    ts.offset,
+    ts.tileCount,
+    ts.tileSize,
+  );
+
+  const are = parseAreFile(
+    extractFileFromSave(path.join(SAVE_DIR, "BALDUR.SAV"), `${areaName}.ARE`),
+  );
+
+  await prepareArea(wed, tis, are, outDir);
+
+  console.log(
+    `[PREP] ${areaName} готов за ${((Date.now() - t0) / 1000).toFixed(1)} c`,
+  );
+}
+
+// ---- Отдача meta.json ----
+app.get("/api/area/:name/meta", (req, res) => {
+  const file = path.join(CACHE_DIR, req.params.name.toUpperCase(), "meta.json");
+  if (!fs.existsSync(file)) return res.status(404).json({ error: "not ready" });
+  res.setHeader("Cache-Control", "public, max-age=3600");
+  res.sendFile(file);
+});
+
+// ---- Отдача чанка ----
+app.get("/api/area/:name/chunk/:kind/:cx/:cy", (req, res) => {
+  const { name, kind, cx, cy } = req.params;
+  const file = path.join(
+    CACHE_DIR,
+    name.toUpperCase(),
+    kind,
+    `${cx}_${cy}.webp`,
+  );
+  if (!fs.existsSync(file)) return res.status(404).end();
+  res.setHeader("Content-Type", "image/webp");
+  res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+  res.sendFile(file);
+});
+
+// ---- Старт ----
+app.listen(PORT, async () => {
   console.log(`✅ http://localhost:${PORT}`);
-  console.log(`   GAME_DIR=${GAME_DIR}`);
-  console.log(`   SAVE_DIR=${SAVE_DIR}`);
-  console.log(`   CACHE_DIR=${CACHE_DIR}`);
+  await bootstrapPrepare();
 });

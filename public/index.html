@@ -1,344 +1,302 @@
 <!doctype html>
 <html>
-<head>
-  <meta charset="utf-8" />
-  <title>AR2600 Map</title>
-  <style>
-    body { margin: 0; background: #111; color: #eee; font-family: monospace; }
-    #status { padding: 8px; }
-    #viewport {
-      position: relative;
-      width: 100vw;
-      height: calc(100vh - 60px);
-      overflow: hidden;
-      cursor: grab;
-      background: #000;
-      contain: strict;
-    }
-    #viewport.dragging { cursor: grabbing; }
-    #layers {
-      position: absolute;
-      top: 0; left: 0;
-      transform-origin: 0 0;
-      will-change: transform;
-    }
-    #layers canvas {
-      position: absolute;
-      top: 0; left: 0;
-      image-rendering: pixelated;
-      pointer-events: none;
-    }
-    .toolbar { padding: 4px 8px; }
-    label { margin-right: 12px; }
-    button { padding: 4px 8px; margin-right: 4px; }
-    #zoomLabel { margin-left: 12px; color: #aaa; }
-    #fpsLabel { margin-left: 12px; color: #8a8; }
-  </style>
-</head>
-<body>
-  <div id="status">Загрузка…</div>
-  <div class="toolbar">
-    <label><input type="checkbox" id="showActors" checked /> Actors</label>
-    <label><input type="checkbox" id="showDoors" checked /> Doors</label>
-    <label><input type="checkbox" id="showOverlay" checked /> Water</label>
-    <button id="zoomIn">+</button>
-    <button id="zoomOut">−</button>
-    <button id="zoomReset">Reset</button>
-    <span id="zoomLabel"></span>
-    <span id="fpsLabel"></span>
-  </div>
-  <div id="viewport">
-    <div id="layers">
-      <canvas id="baseLayer"></canvas>
-      <canvas id="overlayLayer"></canvas>
-      <canvas id="uiLayer"></canvas>
+  <head>
+    <meta charset="utf-8" />
+    <title>AR2600</title>
+    <style>
+      body {
+        margin: 0;
+        background: #111;
+        color: #eee;
+        font-family: monospace;
+      }
+      #status {
+        padding: 8px;
+      }
+      #viewport {
+        position: relative;
+        width: 100vw;
+        height: calc(100vh - 60px);
+        overflow: hidden;
+        cursor: grab;
+        background: #000;
+        contain: strict;
+      }
+      #viewport.dragging {
+        cursor: grabbing;
+      }
+      #layers {
+        position: absolute;
+        top: 0;
+        left: 0;
+        transform-origin: 0 0;
+        will-change: transform;
+      }
+      #layers canvas {
+        position: absolute;
+        top: 0;
+        left: 0;
+        image-rendering: pixelated;
+        pointer-events: none;
+      }
+      .toolbar {
+        padding: 4px 8px;
+      }
+      label {
+        margin-right: 12px;
+      }
+      button {
+        padding: 4px 8px;
+        margin-right: 4px;
+      }
+      #zoomLabel,
+      #fpsLabel,
+      #chunksLabel {
+        margin-left: 12px;
+        color: #aaa;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="status">Загрузка…</div>
+    <div class="toolbar">
+      <button id="zoomIn">+</button>
+      <button id="zoomOut">−</button>
+      <button id="zoomReset">Reset</button>
+      <span id="zoomLabel"></span>
+      <span id="fpsLabel"></span>
+      <span id="chunksLabel"></span>
     </div>
-  </div>
+    <div id="viewport">
+      <div id="layers">
+        <canvas id="baseLayer"></canvas>
+      </div>
+    </div>
 
-<script>
-(async () => {
-  const area = "AR2600";
-  const status = document.getElementById("status");
-  const viewport = document.getElementById("viewport");
-  const layers = document.getElementById("layers");
+    <script>
+      (async () => {
+        const area = "AR2600";
+        const CACHE_VERSION = "v2";
+        const status = document.getElementById("status");
+        const viewport = document.getElementById("viewport");
+        const layers = document.getElementById("layers");
+        const canvasBase = document.getElementById("baseLayer");
+        const ctxBase = canvasBase.getContext("2d");
+        ctxBase.imageSmoothingEnabled = false;
 
-  const canvasBase = document.getElementById("baseLayer");
-  const canvasOv   = document.getElementById("overlayLayer");
-  const canvasUi   = document.getElementById("uiLayer");
+        let renderScheduled = false;
+        function scheduleRender() {
+          if (renderScheduled) return;
+          renderScheduled = true;
+          requestAnimationFrame(() => {
+            renderScheduled = false;
+            renderBase();
+          });
+        }
+        // ---- 1. meta ----
+        status.textContent = "meta…";
+        const meta = await (await fetch(`/api/area/${area}/meta`)).json();
+        console.log("meta:", meta);
 
-  const ctxBase = canvasBase.getContext("2d");
-  const ctxOv   = canvasOv.getContext("2d");
-  const ctxUi   = canvasUi.getContext("2d");
+        canvasBase.width = meta.mapWidth;
+        canvasBase.height = meta.mapHeight;
 
-  ctxBase.imageSmoothingEnabled = false;
-  ctxOv.imageSmoothingEnabled = false;
-  ctxUi.imageSmoothingEnabled = false;
+        const CS = meta.chunkSize;
+        const COLS = meta.chunkCols;
+        const ROWS = meta.chunkRows;
 
-  const TILE = 64;
+        // ---- 2. кэш чанков ----
+        const chunkCache = new Map(); // "cx_cy" → ImageBitmap
+        const chunkLoading = new Map(); // "cx_cy" → Promise
 
-  // ---- загрузка бинарного TIS ----
-  async function loadTis(url) {
-    const buf = await (await fetch(url)).arrayBuffer();
-    const view = new DataView(buf);
-    const tileCount = view.getUint32(0, true);
-    const tiles = [];
-    let off = 4;
-    for (let i = 0; i < tileCount; i++) {
-      const palette = new Uint8Array(buf, off, 1024); off += 1024;
-      const pixels  = new Uint8Array(buf, off, 4096); off += 4096;
-      tiles.push({ palette, pixels });
-    }
-    return { tileCount, tiles };
-  }
+        async function loadChunk(cx, cy) {
+          const key = `${cx}_${cy}`;
+          if (chunkCache.has(key)) return chunkCache.get(key);
+          if (chunkLoading.has(key)) return chunkLoading.get(key);
 
-  status.textContent = "WED…";
-  const wed = await (await fetch(`/api/area/${area}/wed`)).json();
-  status.textContent = "TIS…";
-  const tis    = await loadTis(`/api/area/${area}/tis`);
-  const wtwave = await loadTis(`/api/tis/WTWAVE`);
-  const wtpool = await loadTis(`/api/tis/WTPOOL`);
-  status.textContent = "ARE…";
-  const are = await (await fetch(`/api/area/${area}`)).json();
+          const p = (async () => {
+            // const url = `/api/area/${area}/chunk/base/${cx}/${cy}`;
+            const url = `/api/area/${area}/chunk/base/${cx}/${cy}?v=${CACHE_VERSION}`;
+            const r = await fetch(url);
+            if (!r.ok) return null;
+            const blob = await r.blob();
+            const bitmap = await createImageBitmap(blob);
+            chunkCache.set(key, bitmap);
+            return bitmap;
+          })();
 
-  window.wed = wed; window.tis = tis; window.are = are;
+          chunkLoading.set(key, p);
+          return p;
+        }
 
-  // ---- декодер тайла BGRA → RGBA canvas ----
-  function decodeTile(t) {
-    const pal = t.palette;
-    const pix = t.pixels;
-    const c = document.createElement("canvas");
-    c.width = TILE; c.height = TILE;
-    const cx = c.getContext("2d");
-    cx.imageSmoothingEnabled = false;
-    const img = cx.createImageData(TILE, TILE);
-    for (let i = 0; i < TILE * TILE; i++) {
-      const idx = pix[i] * 4;
-      const b = pal[idx], g = pal[idx+1], r = pal[idx+2];
-      if (r === 0 && g === 255 && b === 0) {
-        img.data[i*4+3] = 0;
-      } else {
-        img.data[i*4+0] = r;
-        img.data[i*4+1] = g;
-        img.data[i*4+2] = b;
-        img.data[i*4+3] = 255;
-      }
-    }
-    cx.putImageData(img, 0, 0);
-    return c;
-  }
+        // ---- 3. зум/панорама ----
+        const zoomLabel = document.getElementById("zoomLabel");
+        const fpsLabel = document.getElementById("fpsLabel");
+        const chunksLabel = document.getElementById("chunksLabel");
+        let scale = 1,
+          offsetX = 0,
+          offsetY = 0;
+        let isDragging = false,
+          dragStartX = 0,
+          dragStartY = 0;
 
-  status.textContent = "Декодирование…";
-  const tileCanvases   = tis.tiles.map(decodeTile);
-  const wtwaveCanvases = wtwave.tiles.map(decodeTile);
-  const wtpoolCanvases = wtpool.tiles.map(decodeTile);
+        function applyTransform() {
+          layers.style.transform = `translate(${offsetX}px, ${offsetY}px) scale(${scale})`;
+          zoomLabel.textContent = `${Math.round(scale * 100)}%`;
+          scheduleRender();
+        }
+        applyTransform();
 
-  // ---- размеры ----
-  const base = wed.overlays[0];
-  const W = base.width, H = base.height;
-  const MAP_W = W * TILE, MAP_H = H * TILE;
-  canvasBase.width = canvasOv.width = canvasUi.width = MAP_W;
-  canvasBase.height = canvasOv.height = canvasUi.height = MAP_H;
+        viewport.addEventListener(
+          "wheel",
+          (e) => {
+            e.preventDefault();
+            const rect = viewport.getBoundingClientRect();
+            const mx = e.clientX - rect.left;
+            const my = e.clientY - rect.top;
+            const oldScale = scale;
+            const delta = -Math.sign(e.deltaY) * 0.15;
+            scale = Math.max(0.1, Math.min(8, scale + delta));
+            offsetX = mx - (mx - offsetX) * (scale / oldScale);
+            offsetY = my - (my - offsetY) * (scale / oldScale);
+            applyTransform();
+          },
+          { passive: false },
+        );
 
-  // ---- base layer: один раз ----
-  status.textContent = "Рендер base…";
-  for (let y = 0; y < H; y++) {
-    for (let x = 0; x < W; x++) {
-      const t = base.tilemap[y * W + x];
-      if (!t || !t.indices.length) continue;
-      const idx = t.indices[0];
-      if (idx < tileCanvases.length) {
-        ctxBase.drawImage(tileCanvases[idx], x * TILE, y * TILE);
-      }
-    }
-  }
+        viewport.addEventListener("mousedown", (e) => {
+          isDragging = true;
+          dragStartX = e.clientX - offsetX;
+          dragStartY = e.clientY - offsetY;
+          viewport.classList.add("dragging");
+        });
+        window.addEventListener("mousemove", (e) => {
+          if (!isDragging) return;
+          offsetX = e.clientX - dragStartX;
+          offsetY = e.clientY - dragStartY;
+          applyTransform();
+        });
+        window.addEventListener("mouseup", () => {
+          isDragging = false;
+          viewport.classList.remove("dragging");
+        });
 
-  // ---- overlay cells ----
-  const waveCells = [];
-  const poolCells = [];
-  for (let y = 0; y < H; y++) {
-    for (let x = 0; x < W; x++) {
-      const t = base.tilemap[y * W + x];
-      if (!t) continue;
-      if (t.overlayFlags & 2) waveCells.push({ x, y, tile: t });
-      else if (t.overlayFlags & 4) poolCells.push({ x, y, tile: t });
-    }
-  }
-  console.log(`WTWAVE: ${waveCells.length}, WTPOOL: ${poolCells.length}`);
+        document.getElementById("zoomIn").onclick = () => {
+          scale = Math.min(8, scale * 1.25);
+          applyTransform();
+        };
+        document.getElementById("zoomOut").onclick = () => {
+          scale = Math.max(0.1, scale / 1.25);
+          applyTransform();
+        };
+        document.getElementById("zoomReset").onclick = () => {
+          scale = 1;
+          offsetX = 0;
+          offsetY = 0;
+          applyTransform();
+        };
 
-  // ---- UI layer: двери + акторы ----
-  if (are.doors && are.vertices) {
-    ctxUi.strokeStyle = "#ff0";
-    ctxUi.lineWidth = 2;
-    for (const d of are.doors) {
-      const v = d.openVertices;
-      if (!v || v.count < 2) continue;
-      ctxUi.beginPath();
-      for (let i = 0; i < v.count; i++) {
-        const pt = are.vertices[v.index + i];
-        if (!pt) continue;
-        if (i === 0) ctxUi.moveTo(pt.x, pt.y); else ctxUi.lineTo(pt.x, pt.y);
-      }
-      ctxUi.closePath();
-      ctxUi.stroke();
-    }
-  }
-  if (are.actors) {
-    ctxUi.fillStyle = "rgba(255,0,0,0.8)";
-    for (const a of are.actors) {
-      ctxUi.beginPath();
-      ctxUi.arc(a.x, a.y, 4, 0, 2 * Math.PI);
-      ctxUi.fill();
-    }
-  }
+        // ---- 4. видимые чанки ----
+        function getVisibleRange() {
+          const vw = viewport.clientWidth;
+          const vh = viewport.clientHeight;
+          const viewLeft = -offsetX / scale;
+          const viewTop = -offsetY / scale;
+          const viewRight = viewLeft + vw / scale;
+          const viewBottom = viewTop + vh / scale;
 
-  status.textContent = `Готово: ${W}×${H}`;
+          const cx0 = Math.max(0, Math.floor(viewLeft / CS) - 1);
+          const cy0 = Math.max(0, Math.floor(viewTop / CS) - 1);
+          const cx1 = Math.min(COLS - 1, Math.floor(viewRight / CS) + 1);
+          const cy1 = Math.min(ROWS - 1, Math.floor(viewBottom / CS) + 1);
+          return {
+            cx0,
+            cy0,
+            cx1,
+            cy1,
+            viewLeft,
+            viewTop,
+            viewRight,
+            viewBottom,
+          };
+        }
 
-  // ---- предкомпиляция overlay-кадров ----
-  // Для каждой ячейки и каждого кадра — готовый canvas с overlay+маской.
-  const allOverlay = [
-    ...waveCells.map(c => ({ ...c, kind: "wave" })),
-    ...poolCells.map(c => ({ ...c, kind: "pool" })),
-  ];
-  const FRAMES = 6;
+       
 
-  const tmp = document.createElement("canvas");
-  tmp.width = tmp.height = TILE;
-  const tmpCtx = tmp.getContext("2d");
-  tmpCtx.imageSmoothingEnabled = false;
+        async function renderBase() {
+          renderScheduled = false;
+          const { cx0, cy0, cx1, cy1 } = getVisibleRange();
 
-  function buildFrame(overlayCanvas, baseCanvas) {
-  const c = document.createElement("canvas");
-  c.width = c.height = TILE;
-  const cx = c.getContext("2d");
-  cx.imageSmoothingEnabled = false;
-  cx.drawImage(overlayCanvas, 0, 0);
-  cx.drawImage(baseCanvas, 0, 0);   // просто поверх, без destination-in
-  return c;
-}
+          // Загружаем недостающие параллельно
+          const promises = [];
+          for (let cy = cy0; cy <= cy1; cy++) {
+            for (let cx = cx0; cx <= cx1; cx++) {
+              promises.push(loadChunk(cx, cy));
+            }
+          }
+          await Promise.all(promises);
 
-  status.textContent = "Предкомпиляция overlay…";
-  const precomputed = [];     // [frame][cellIndex] → canvas
-  for (let f = 0; f < FRAMES; f++) {
-    const arr = new Array(allOverlay.length);
-    for (let i = 0; i < allOverlay.length; i++) {
-      const c = allOverlay[i];
-      const overlay = c.kind === "wave"
-        ? wtwaveCanvases[f % wtwaveCanvases.length]
-        : wtpoolCanvases[f % wtpoolCanvases.length];
-      arr[i] = buildFrame(overlay, tileCanvases[c.tile.indices[0]]);
-    }
-    precomputed.push(arr);
-  }
+          // Рисуем
+          ctxBase.clearRect(0, 0, canvasBase.width, canvasBase.height);
+          for (let cy = cy0; cy <= cy1; cy++) {
+            for (let cx = cx0; cx <= cx1; cx++) {
+              const bitmap = chunkCache.get(`${cx}_${cy}`);
+              if (bitmap) {
+                ctxBase.drawImage(bitmap, cx * CS, cy * CS);
+              }
+            }
+          }
 
-  // ---- зум / панорама ----
-  const zoomLabel = document.getElementById("zoomLabel");
-  const fpsLabel  = document.getElementById("fpsLabel");
-  let scale = 1, offsetX = 0, offsetY = 0;
-  let isDragging = false, dragStartX = 0, dragStartY = 0;
+          chunksLabel.textContent = `${chunkCache.size} chunks`;
+          scheduleUnload();
+        }
 
-  function applyTransform() {
-    layers.style.transform = `translate(${offsetX}px, ${offsetY}px) scale(${scale})`;
-    zoomLabel.textContent = `${Math.round(scale * 100)}%`;
-  }
-  applyTransform();
+        // ---- 6. выгрузка дальних чанков ----
+        let unloadTimer = null;
+        function scheduleUnload() {
+          if (unloadTimer) return;
+          unloadTimer = setTimeout(unloadFarChunks, 5000);
+        }
+        function unloadFarChunks() {
+          unloadTimer = null;
+          const { cx0, cy0, cx1, cy1 } = getVisibleRange();
+          const PAD = 2;
+          for (const [key, bitmap] of chunkCache) {
+            const [cx, cy] = key.split("_").map(Number);
+            if (
+              cx < cx0 - PAD ||
+              cx > cx1 + PAD ||
+              cy < cy0 - PAD ||
+              cy > cy1 + PAD
+            ) {
+              bitmap.close();
+              chunkCache.delete(key);
+            }
+          }
+        }
 
-  viewport.addEventListener("wheel", (e) => {
-    e.preventDefault();
-    const rect = viewport.getBoundingClientRect();
-    const mx = e.clientX - rect.left;
-    const my = e.clientY - rect.top;
-    const oldScale = scale;
-    const delta = -Math.sign(e.deltaY) * 0.15;
-    scale = Math.max(0.1, Math.min(8, scale + delta));
-    offsetX = mx - (mx - offsetX) * (scale / oldScale);
-    offsetY = my - (my - offsetY) * (scale / oldScale);
-    applyTransform();
-  }, { passive: false });
+        // ---- 7. FPS ----
+        let frames = 0,
+          fpsAcc = 0,
+          fpsLast = performance.now();
+        function fpsTick() {
+          const now = performance.now();
+          frames++;
+          fpsAcc += now - fpsLast;
+          fpsLast = now;
+          if (fpsAcc > 500) {
+            fpsLabel.textContent = `${(1000 / (fpsAcc / frames)).toFixed(0)} fps`;
+            frames = 0;
+            fpsAcc = 0;
+          }
+          requestAnimationFrame(fpsTick);
+        }
+        requestAnimationFrame(fpsTick);
 
-  viewport.addEventListener("mousedown", (e) => {
-    isDragging = true;
-    dragStartX = e.clientX - offsetX;
-    dragStartY = e.clientY - offsetY;
-    viewport.classList.add("dragging");
-  });
-  window.addEventListener("mousemove", (e) => {
-    if (!isDragging) return;
-    offsetX = e.clientX - dragStartX;
-    offsetY = e.clientY - dragStartY;
-    applyTransform();
-  });
-  window.addEventListener("mouseup", () => {
-    isDragging = false;
-    viewport.classList.remove("dragging");
-  });
-
-  document.getElementById("zoomIn").onclick = () => {
-    scale = Math.min(8, scale * 1.25); applyTransform();
-  };
-  document.getElementById("zoomOut").onclick = () => {
-    scale = Math.max(0.1, scale / 1.25); applyTransform();
-  };
-  document.getElementById("zoomReset").onclick = () => {
-    scale = 1; offsetX = 0; offsetY = 0; applyTransform();
-  };
-
-  // ---- анимация overlay (только видимые ячейки) ----
-  const showOverlay = document.getElementById("showOverlay");
-  let frame = 0;
-  let lastTime = 0;
-  let fpsAcc = 0, fpsCount = 0, fpsLast = performance.now();
-  const FRAME_MS = 1000 / 15;
-
-  function isVisible(x, y, viewLeft, viewTop, viewRight, viewBottom) {
-    const px = x * TILE, py = y * TILE;
-    return !(px + TILE < viewLeft || px > viewRight ||
-             py + TILE < viewTop  || py > viewBottom);
-  }
-
-  function animate(time) {
-    if (time - lastTime < FRAME_MS) {
-      requestAnimationFrame(animate);
-      return;
-    }
-    lastTime = time;
-    frame = (frame + 1) % FRAMES;
-
-    if (showOverlay.checked) {
-      const vw = viewport.clientWidth, vh = viewport.clientHeight;
-      const viewLeft   = -offsetX / scale;
-      const viewTop    = -offsetY / scale;
-      const viewRight  = viewLeft + vw / scale;
-      const viewBottom = viewTop  + vh / scale;
-
-      // Очищаем только видимую область
-      ctxOv.clearRect(
-        Math.max(0, viewLeft),
-        Math.max(0, viewTop),
-        Math.min(MAP_W, viewRight) - Math.max(0, viewLeft),
-        Math.min(MAP_H, viewBottom) - Math.max(0, viewTop),
-      );
-
-      for (let i = 0; i < allOverlay.length; i++) {
-        const c = allOverlay[i];
-        if (!isVisible(c.x, c.y, viewLeft, viewTop, viewRight, viewBottom)) continue;
-        ctxOv.drawImage(precomputed[frame][i], c.x * TILE, c.y * TILE);
-      }
-    }
-
-    // FPS
-    const now = performance.now();
-    fpsAcc += now - fpsLast;
-    fpsCount++;
-    fpsLast = now;
-    if (fpsAcc > 500) {
-      fpsLabel.textContent = `${(1000 / (fpsAcc / fpsCount)).toFixed(0)} fps`;
-      fpsAcc = 0; fpsCount = 0;
-    }
-
-    requestAnimationFrame(animate);
-  }
-  requestAnimationFrame(animate);
-})();
-</script>
-</body>
+        // ---- 8. старт ----
+        await renderBase();
+        status.textContent = `Готово: ${meta.width}×${meta.height} тайлов, ${COLS}×${ROWS} чанков`;
+      })();
+    </script>
+  </body>
 </html>
