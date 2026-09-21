@@ -14,6 +14,8 @@ app.use("/api", require("./routes/tis"));
 app.use("/api", require("./routes/chunk"));
 app.use("/api", require("./routes/bmp"));
 
+app.use("/api", require("./routes/doors"));
+
 app.listen(PORT, async () => {
   console.log(`✅ http://localhost:${PORT}`);
   const { bootstrapPrepare } = require("./lib/bootstrap");

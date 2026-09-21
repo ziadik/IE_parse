@@ -9,6 +9,20 @@ const { parseAreFile } = require("../../parsers/are");
 const { extractByType } = require("../../parsers/bif");
 const { extractFileFromSave } = require("../../parsers/sav");
 
+
+router.get("/area/:name/door-tile/:idx.png", (req, res) => {
+  const idx = req.params.idx;
+  const file = path.join(
+    CACHE_DIR,
+    req.params.name.toUpperCase(),
+    "door-tiles",
+    `${idx}.png`,
+  );
+  if (!fs.existsSync(file)) return res.status(404).end();
+  res.setHeader("Content-Type", "image/png");
+  res.setHeader("Cache-Control", "public, max-age=3600");
+  res.sendFile(file);
+});
 //Doors
 router.get("/area/:name/doors", (req, res) => {
   const file = path.join(
@@ -31,6 +45,21 @@ router.get("/area/:name/door-sprite/:file", (req, res) => {
   if (!fs.existsSync(file)) return res.status(404).end();
   res.setHeader("Content-Type", "image/png");
   res.sendFile(file);
+});
+
+router.get("/area/:name/door-tiles", (req, res) => {
+  try {
+    const name = req.params.name.toUpperCase();
+    const file = path.join(CACHE_DIR, name, "doors.json");
+    if (!fs.existsSync(file)) return res.status(404).json({ error: "not ready" });
+    const doors = JSON.parse(fs.readFileSync(file, "utf8"));
+
+    // Собираем уникальные secondary-индексы
+    const indices = new Set();
+    // Нужен доступ к tilemap — берём из мета/кеша
+    // Проще: при подготовке уже собрать список secondary indices и их TIS-тайлы
+    res.json({ indices: [...indices] });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // GET /api/area/:name/actors

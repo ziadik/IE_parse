@@ -115,7 +115,7 @@ function parseWedFile(buffer) {
   // --- Doors ---
   const doors = [];
   for (let i = 0; i < doorCount; i++) {
-    const o = offsetToDoors + i * 0x1c;
+    const o = offsetToDoors + i * 0x1a;
     doors.push({
       name: buffer.toString("ascii", o, o + 8).replace(/\0.*$/, ""),
       state: buffer.readUInt16LE(o + 0x08),
@@ -152,6 +152,7 @@ function parseWedFile(buffer) {
     doors,
     secondary,
     offsetToDoorTileCells,
+    buffer,
   };
 }
 

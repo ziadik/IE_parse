@@ -31,11 +31,7 @@ async function buildBaseChunk(cx, cy, base, tileRGBA, W, H, outDir) {
       const cell = base.tilemap[mapY * W + mapX];
       if (!cell || !cell.indices.length) continue;
 
-      // Для дверей: secondaryTileIndex — прямой индекс в TIS
-      const tileIdx =
-        cell.secondaryTileIndex !== 0xffff && cell.secondaryTileIndex !== 65535
-          ? cell.secondaryTileIndex
-          : cell.indices[0];
+      const tileIdx = cell.indices[0];
 
       if (tileIdx >= tileRGBA.length) continue;
       const dstX = mapX * TILE_PX - px0,
