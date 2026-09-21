@@ -6,7 +6,10 @@ function parseCreHeader(buffer, offset = 0) {
   if (sig !== "CRE ") throw new Error(`Not CRE: '${sig}'`);
 
   const version = buffer.toString("ascii", offset + 4, offset + 8);
-
+  const colors = [];
+  for (let i = 0; i < 7; i++) {
+    colors.push(buffer.readUInt8(offset + 0x2c + i));
+  }
   return {
     version,
     longStrRef: buffer.readUInt32LE(offset + 0x08),
@@ -19,6 +22,7 @@ function parseCreHeader(buffer, offset = 0) {
     hp: buffer.readUInt16LE(offset + 0x24),
     maxHP: buffer.readUInt16LE(offset + 0x26),
     animationID: buffer.readUInt32LE(offset + 0x28),
+    colors,
   };
 }
 

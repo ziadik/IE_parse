@@ -5,8 +5,17 @@ const { parseCreHeader } = require("../parsers/cre");
 const { parseBamFile } = require("../parsers/bam");
 const { parseKeyFile } = require("../parsers/key");
 const { parseBiffFile } = require("../parsers/bif");
-
+const { loadPalette16, setupPaperdollColours } = require("./palette16");
 const GAME_DIR = process.env.GAME_DIR || "I:\\BG";
+
+
+// Один раз при загрузке модуля:
+let _palLoaded = false;
+function ensurePalette() {
+  if (_palLoaded) return;
+  loadPalette16(path.join(GAME_DIR, "2da", "MPALETTE.bmp"));
+  _palLoaded = true;
+}
 
 // --- avatars.2da ---
 function parseAvatars2da(text) {
@@ -98,16 +107,36 @@ function findBam(resref) {
 // Если нет — серая.
 
 // --- BAM → PNG ---
-async function bamToPng(bamBuffer, cycleIndex = 0, frameIndex = 0) {
+async function bamToPng(bamBuffer, creColors, cycleIndex = 0, frameIndex = 0) {
   const parsed = parseBamFile(bamBuffer);
   const cycle = parsed.cycles[cycleIndex];
-  if (!cycle || cycle.length === 0) return null;
-  const frameIdx = cycle[Math.min(frameIndex, cycle.length - 1)];
-  const f = parsed.frames[frameIdx];
-  const rgba = parsed.decodedFrames[frameIdx];
+  if (!cycle || !cycle.length) return null;
+  const fi = cycle[Math.min(frameIndex, cycle.length - 1)];
+  const f = parsed.frames[fi];
+  const { rgba, indices } = parsed.decodedFrames[fi];
   if (!rgba || !f.width || !f.height) return null;
 
-  return sharp(Buffer.from(rgba), {
+  // Если BAM fake-color (colorCount=0) и есть цвета из CRE — применяем палитру
+  let finalRGBA = rgba;
+
+  if (parsed.colorCount === 0 && creColors && indices) {
+    const fakePal = setupPaperdollColours(creColors);
+    finalRGBA = new Uint8ClampedArray(f.width * f.height * 4);
+    for (let i = 0; i < f.width * f.height; i++) {
+      const idx = indices[i];
+      if (idx === 0) {
+        finalRGBA[i * 4 + 3] = 0;
+      } else {
+        const c = fakePal[idx];
+        finalRGBA[i * 4 + 0] = c.r;
+        finalRGBA[i * 4 + 1] = c.g;
+        finalRGBA[i * 4 + 2] = c.b;
+        finalRGBA[i * 4 + 3] = 255;
+      }
+    }
+  }
+
+  return sharp(Buffer.from(finalRGBA), {
     raw: { width: f.width, height: f.height, channels: 4 },
   })
     .png()
@@ -116,6 +145,7 @@ async function bamToPng(bamBuffer, cycleIndex = 0, frameIndex = 0) {
 
 // --- Основная функция: сгенерить PNG для всех акторов ---
 async function prepareActors(areBuffer, areParsed, outDir) {
+  ensurePalette();
   fs.mkdirSync(outDir, { recursive: true });
   fs.mkdirSync(path.join(outDir, "actors"), { recursive: true });
 
@@ -144,25 +174,24 @@ async function prepareActors(areBuffer, areParsed, outDir) {
             const found = findBam(cand);
             if (found) {
               bamName = cand;
-              const parsed = parseBamFile(found.bam);
-              const cycle = parsed.cycles[0];
-              if (cycle && cycle.length > 0) {
-                const fi = cycle[0];
-                const f = parsed.frames[fi];
-                const rgba = parsed.decodedFrames[fi];
-                if (rgba && f.width && f.height) {
-                  const png = await sharp(Buffer.from(rgba), {
-                    raw: { width: f.width, height: f.height, channels: 4 },
-                  })
-                    .png()
-                    .toBuffer();
+              try {
+                const png = await bamToPng(found.bam, cre.colors, 0, 0);
+                if (png) {
                   spriteFile = `actors/${i}.png`;
                   fs.writeFileSync(path.join(outDir, spriteFile), png);
+
+                  // Получаем размеры и offset кадра
+                  const parsed = parseBamFile(found.bam);
+                  const cycle = parsed.cycles[0];
+                  const fi = cycle[0];
+                  const f = parsed.frames[fi];
                   spriteW = f.width;
                   spriteH = f.height;
-                  spriteOffX = f.x; // смещение центра
+                  spriteOffX = f.x;
                   spriteOffY = f.y;
                 }
+              } catch (e) {
+                console.warn(`[ACTOR ${i}] bamToPng: ${e.message}`);
               }
               break;
             }

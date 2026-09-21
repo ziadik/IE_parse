@@ -82,7 +82,9 @@ function parseBamFile(buffer) {
     cycles.push(indices);
   }
   // ---- Декодируем каждый кадр в RGBA ----
-  const decodedFrames = frames.map((f) => decodeBamFrame(buffer, f, palette));
+  const decodedFrames = frames.map((f) =>
+    decodeBamFrame(buffer, f, palette, colorCount),
+  );
 
   return {
     version,
@@ -104,32 +106,31 @@ function decodeBamFrame(buffer, frame, palette, colorKey = 0) {
 
   let p = frame.dataOffset;
   let i = 0;
-
   while (i < pixelCount) {
     const px = buffer[p++];
     if (px === colorKey) {
       const count = buffer[p++];
       const len = Math.min(1 + count, pixelCount - i);
-      // indices[i..i+len-1] уже 0 (colorKey), просто пропускаем
       i += len;
     } else {
       indices[i++] = px;
     }
   }
 
-  const out = new Uint8ClampedArray(pixelCount * 4);
+  const rgba = new Uint8ClampedArray(pixelCount * 4);
   for (let j = 0; j < pixelCount; j++) {
     const idx = indices[j];
     if (idx === colorKey) {
-      out[j * 4 + 3] = 0;
+      rgba[j * 4 + 3] = 0;
     } else {
-      out[j * 4 + 0] = palette[idx * 3 + 0];
-      out[j * 4 + 1] = palette[idx * 3 + 1];
-      out[j * 4 + 2] = palette[idx * 3 + 2];
-      out[j * 4 + 3] = 255;
+      rgba[j * 4 + 0] = palette[idx * 3 + 0];
+      rgba[j * 4 + 1] = palette[idx * 3 + 1];
+      rgba[j * 4 + 2] = palette[idx * 3 + 2];
+      rgba[j * 4 + 3] = 255;
     }
   }
-  return out;
+
+  return { rgba, indices };
 }
 
 module.exports = { parseBamFile };
