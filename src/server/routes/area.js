@@ -9,6 +9,29 @@ const { parseAreFile } = require("../../parsers/are");
 const { extractByType } = require("../../parsers/bif");
 const { extractFileFromSave } = require("../../parsers/sav");
 
+//Doors
+router.get("/area/:name/doors", (req, res) => {
+  const file = path.join(
+    CACHE_DIR,
+    req.params.name.toUpperCase(),
+    "doors.json",
+  );
+  if (!fs.existsSync(file)) return res.status(404).json({ error: "not ready" });
+  res.json(JSON.parse(fs.readFileSync(file, "utf8")));
+});
+
+router.get("/area/:name/door-sprite/:file", (req, res) => {
+  const file = path.join(
+    CACHE_DIR,
+    req.params.name.toUpperCase(),
+    "doors-preview",
+    "doors",
+    req.params.file,
+  );
+  if (!fs.existsSync(file)) return res.status(404).end();
+  res.setHeader("Content-Type", "image/png");
+  res.sendFile(file);
+});
 
 // GET /api/area/:name/actors
 router.get("/area/:name/actors", (req, res) => {

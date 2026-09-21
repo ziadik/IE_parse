@@ -24,7 +24,7 @@ import { initUI } from "./ui.js";
   // UI layer: акторы + двери
   await initActors();
   // initActors(are);
-  initDoors(are, meta);
+  await initDoors(are, meta);
 
   // Зум/панорама
   initViewport({

@@ -1,22 +1,24 @@
-export function initDoors(are, meta) {
+import { state } from "./state.js";
+
+export async function initDoors() {
   const canvas = document.getElementById("uiLayer");
   const ctx = canvas.getContext("2d");
 
-  if (!are.doors || !are.vertices) return;
+  const doors = await (await fetch(`/api/area/${state.area}/doors`)).json();
+  console.log(`Дверей: ${doors.length}`);
 
-  ctx.strokeStyle = "#ff0";
-  ctx.lineWidth = 2;
-  for (const d of are.doors) {
-    const v = d.openVertices;
-    if (!v || v.count < 2) continue;
-    ctx.beginPath();
-    for (let i = 0; i < v.count; i++) {
-      const pt = are.vertices[v.index + i];
-      if (!pt) continue;
-      if (i === 0) ctx.moveTo(pt.x, pt.y);
-      else ctx.lineTo(pt.x, pt.y);
-    }
-    ctx.closePath();
-    ctx.stroke();
+  for (const d of doors) {
+    if (!d.sprite) continue;
+    await new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        const dx = d.x - (d.spriteOffX || 0);
+        const dy = d.y - (d.spriteOffY || 0);
+        ctx.drawImage(img, dx, dy);
+        resolve();
+      };
+      img.onerror = resolve;
+      img.src = `/api/area/${state.area}/door-sprite/${d.sprite.split("/").pop()}`;
+    });
   }
 }

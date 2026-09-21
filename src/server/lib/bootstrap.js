@@ -9,6 +9,9 @@ const { extractFileFromSave } = require("../../parsers/sav");
 const { extractByType } = require("../../parsers/bif");
 const { prepareArea } = require("../../prep/prepare");
 const { prepareActors } = require("../../prep/actors");
+const { prepareDoors } = require("../../prep/doors");
+
+
 
 async function loadTisByName(resref) {
   const e = findTisEntry(resref);
@@ -23,13 +26,12 @@ async function bootstrapPrepare() {
   const areaName = "AR2600";
   const outDir = path.join(CACHE_DIR, areaName);
 
-  const metaExists = fs.existsSync(path.join(outDir, "meta.json"));
-  const actorsExists = fs.existsSync(path.join(outDir, "actors.json"));
-
-  if (metaExists && actorsExists) {
-    console.log(`[CACHE] ${areaName} уже подготовлен`);
-    return;
-  }
+  if (fs.existsSync(path.join(outDir, "meta.json")) &&
+    fs.existsSync(path.join(outDir, "actors.json")) &&
+    fs.existsSync(path.join(outDir, "doors.json"))) {
+  console.log(`[CACHE] ${areaName} уже подготовлен`);
+  return;
+}
 
   console.log(`[PREP] подготовка ${areaName}...`);
   const t0 = Date.now();
@@ -52,19 +54,22 @@ async function bootstrapPrepare() {
   const wtwave = await loadTisByName("WTWAVE");
   const wtpool = await loadTisByName("WTPOOL");
 
-  await prepareArea({ wed, tis, are, wtwave, wtpool, outDir });
-
+  
   try {
     const actorsOut = path.join(outDir, "actors-preview");
     const actors = await prepareActors(areBuffer, are, actorsOut);
     fs.writeFileSync(path.join(outDir, "actors.json"), JSON.stringify(actors));
     console.log(`[PREP] actors: ${actors.length}`);
+    const doors = await prepareDoors(are, outDir);
+    fs.writeFileSync(path.join(outDir, "doors.json"), JSON.stringify(doors));
+    console.log(`[PREP] doors: ${doors.length}`);
   } catch (e) {
     console.error(`[PREP] actors failed: ${e.message}`);
     // Заглушка, чтобы не пересобирать вечно
     fs.writeFileSync(path.join(outDir, "actors.json"), JSON.stringify([]));
   }
-
+  
+  await prepareArea({ wed, tis, are, wtwave, wtpool, outDir });
   console.log(
     `[PREP] ${areaName} готов за ${((Date.now() - t0) / 1000).toFixed(1)} c`,
   );
