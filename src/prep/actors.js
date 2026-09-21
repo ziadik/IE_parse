@@ -6,10 +6,9 @@ const { parseBamFile } = require("../parsers/bam");
 const { parseKeyFile } = require("../parsers/key");
 const { parseBiffFile } = require("../parsers/bif");
 const { loadPalette16, setupPaperdollColours } = require("./palette16");
+
 const GAME_DIR = process.env.GAME_DIR || "I:\\BG";
 
-
-// Один раз при загрузке модуля:
 let _palLoaded = false;
 function ensurePalette() {
   if (_palLoaded) return;
@@ -102,12 +101,8 @@ function findBam(resref) {
   };
 }
 
-// --- Дефолтная палитра (для BAM, у которых нет своей) ---
-// Для большинства BG1 монстров палитра встроена (colorCount > 0).
-// Если нет — серая.
-
-// --- BAM → PNG ---
-async function bamToPng(bamBuffer, creColors, cycleIndex = 0, frameIndex = 0) {
+// --- BAM → PNG (один кадр) ---
+async function bamToPng(bamBuffer, creColors, cycleIndex, frameIndex) {
   const parsed = parseBamFile(bamBuffer);
   const cycle = parsed.cycles[cycleIndex];
   if (!cycle || !cycle.length) return null;
@@ -116,7 +111,6 @@ async function bamToPng(bamBuffer, creColors, cycleIndex = 0, frameIndex = 0) {
   const { rgba, indices } = parsed.decodedFrames[fi];
   if (!rgba || !f.width || !f.height) return null;
 
-  // Если BAM fake-color (colorCount=0) и есть цвета из CRE — применяем палитру
   let finalRGBA = rgba;
 
   if (parsed.colorCount === 0 && creColors && indices) {
@@ -136,14 +130,34 @@ async function bamToPng(bamBuffer, creColors, cycleIndex = 0, frameIndex = 0) {
     }
   }
 
-  return sharp(Buffer.from(finalRGBA), {
-    raw: { width: f.width, height: f.height, channels: 4 },
-  })
-    .png()
-    .toBuffer();
+  return {
+    png: await sharp(Buffer.from(finalRGBA), {
+      raw: { width: f.width, height: f.height, channels: 4 },
+    })
+      .png()
+      .toBuffer(),
+    w: f.width,
+    h: f.height,
+    offX: f.x,
+    offY: f.y,
+  };
 }
 
-// --- Основная функция: сгенерить PNG для всех акторов ---
+// --- Все кадры цикла ---
+async function bamToFrames(bamBuffer, creColors, cycleIndex) {
+  const parsed = parseBamFile(bamBuffer);
+  const cycle = parsed.cycles[cycleIndex];
+  if (!cycle || !cycle.length) return [];
+
+  const frames = [];
+  for (let k = 0; k < cycle.length; k++) {
+    const fr = await bamToPng(bamBuffer, creColors, cycleIndex, k);
+    frames.push(fr);
+  }
+  return frames;
+}
+
+// --- Основная функция ---
 async function prepareActors(areBuffer, areParsed, outDir) {
   ensurePalette();
   fs.mkdirSync(outDir, { recursive: true });
@@ -156,11 +170,7 @@ async function prepareActors(areBuffer, areParsed, outDir) {
     let animID = 0;
     let prefix = null;
     let bamName = null;
-    let spriteFile = null;
-    let spriteW = 0,
-      spriteH = 0;
-    let spriteOffX = 0,
-      spriteOffY = 0;
+    let anims = { walk: [], stand: [], attack: [] };
 
     try {
       if (a.creOffset && a.creOffset + 0x28 < areBuffer.length) {
@@ -174,25 +184,23 @@ async function prepareActors(areBuffer, areParsed, outDir) {
             const found = findBam(cand);
             if (found) {
               bamName = cand;
-              try {
-                const png = await bamToPng(found.bam, cre.colors, 0, 0);
-                if (png) {
-                  spriteFile = `actors/${i}.png`;
-                  fs.writeFileSync(path.join(outDir, spriteFile), png);
 
-                  // Получаем размеры и offset кадра
-                  const parsed = parseBamFile(found.bam);
-                  const cycle = parsed.cycles[0];
-                  const fi = cycle[0];
-                  const f = parsed.frames[fi];
-                  spriteW = f.width;
-                  spriteH = f.height;
-                  spriteOffX = f.x;
-                  spriteOffY = f.y;
-                }
-              } catch (e) {
-                console.warn(`[ACTOR ${i}] bamToPng: ${e.message}`);
-              }
+              // orientation 0..15 → direction 0..7
+              const dir = Math.floor((a.orientation || 0) / 2) % 8;
+
+              // cycles (для BAM CHAAnim):
+              //   0..7   = walk  (8 направлений)
+              //   8..15  = stand (8 направлений)
+              //   16..23 = attack (8 направлений)
+              anims.walk = (
+                await bamToFrames(found.bam, cre.colors, dir)
+              ).filter(Boolean);
+              anims.stand = (
+                await bamToFrames(found.bam, cre.colors, 16 + dir)
+              ).filter(Boolean);
+              anims.attack = (
+                await bamToFrames(found.bam, cre.colors, 16 + dir)
+              ).filter(Boolean);
               break;
             }
           }
@@ -202,17 +210,45 @@ async function prepareActors(areBuffer, areParsed, outDir) {
       console.warn(`[ACTOR ${i}] ${e.message}`);
     }
 
+    // Сохраняем кадры
+    const saveFrames = (name, frames) => {
+      for (let k = 0; k < frames.length; k++) {
+        fs.writeFileSync(
+          path.join(outDir, "actors", `${i}_${name}_${k}.png`),
+          frames[k].png,
+        );
+      }
+      return frames.map((_, k) => `actors/${i}_${name}_${k}.png`);
+    };
+
+    const walkFiles = saveFrames("walk", anims.walk);
+    const standFiles = saveFrames("stand", anims.stand);
+    const attackFiles = saveFrames("attack", anims.attack);
+
+    const ref = anims.stand[0] ||
+      anims.walk[0] ||
+      anims.attack[0] || { w: 0, h: 0, offX: 0, offY: 0 };
+
     enrichedActors.push({
       x: a.x,
       y: a.y,
+      orientation: a.orientation || 0,
       animID: `0x${animID.toString(16)}`,
       prefix,
       bamName,
-      sprite: spriteFile,
-      spriteW,
-      spriteH,
-      spriteOffX,
-      spriteOffY,
+      frameW: ref.w,
+      frameH: ref.h,
+      frameOffX: ref.offX,
+      frameOffY: ref.offY,
+      anims: {
+        walk: { frames: walkFiles, count: walkFiles.length },
+        stand: { frames: standFiles, count: standFiles.length },
+        attack: { frames: attackFiles, count: attackFiles.length },
+      },
+      // дефолтная анимация:
+      // если актор стоит на месте (dest == current) — stand, иначе walk
+      currentAnim:
+        a.destX === a.currentX && a.destY === a.currentY ? "stand" : "walk",
     });
   }
 

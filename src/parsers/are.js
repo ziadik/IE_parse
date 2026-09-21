@@ -1,6 +1,7 @@
+// src/parsers/are.js
 const { Parser } = require("binary-parser");
 
-// Actor (0x110 байт)
+// --- Actor (0x110 байт) ---
 const areActorParser = new Parser()
   .endianness("little")
   .string("name", { length: 32, encoding: "ascii", stripNull: true }) // 0x00
@@ -9,42 +10,45 @@ const areActorParser = new Parser()
   .uint16("destX") // 0x24
   .uint16("destY") // 0x26
   .uint32("flags") // 0x28
-  .skip(0x80 - 0x2c) // до 0x80
+  .skip(0x30 - 0x2c) // 0x2c–0x2f
+  .uint32("actorAnimation") // 0x30
+  .uint16("orientation") // 0x34
+  .skip(0x80 - 0x36) // 0x36–0x7f
   .string("creResref", { length: 8, encoding: "ascii", stripNull: true }) // 0x80
   .uint32("creOffset") // 0x88
   .uint32("creSize"); // 0x8c
 
-// Door (0xC8)
+// --- Door (0xC8 = 200 байт) ---
 const areDoorParser = new Parser()
   .endianness("little")
-  .string("name", { length: 32, encoding: "ascii", stripNull: true })
-  .string("doorId", { length: 8, encoding: "ascii", stripNull: true })
-  .uint32("flags")
-  .uint32("openVertexIndex")
-  .uint16("openVertexCount")
-  .uint16("closedVertexCount")
-  .uint32("closedVertexIndex")
-  .skip(0xc8 - 0x38);
+  .string("name", { length: 32, encoding: "ascii", stripNull: true }) // 0x00
+  .string("doorId", { length: 8, encoding: "ascii", stripNull: true }) // 0x20
+  .uint32("flags") // 0x28
+  .uint32("openVertexIndex") // 0x2c
+  .uint16("openVertexCount") // 0x30
+  .uint16("closedVertexCount") // 0x32
+  .uint32("closedVertexIndex") // 0x34
+  .skip(0xc8 - 0x38); // до конца
 
-// ARE Header
+// --- Header (ARE V1.0) ---
 const areHeaderParser = new Parser()
   .endianness("little")
-  .string("signature", { length: 4, encoding: "ascii" })
-  .string("version", { length: 4, encoding: "ascii" })
-  .string("wedResref", { length: 8, encoding: "ascii", stripNull: true })
-  .uint32("lastSaved")
-  .uint32("areaFlags")
-  .skip(0x54 - 0x18)
-  .uint32("offsetToActors")
-  .uint16("countOfActors")
-  .uint16("countOfRegions")
-  .uint32("offsetToRegions")
-  .skip(0x7c - 0x60)
-  .uint32("offsetToVertices")
-  .uint16("countOfVertices")
-  .skip(0xa4 - 0x82)
-  .uint32("countOfDoors")
-  .uint32("offsetToDoors");
+  .string("signature", { length: 4, encoding: "ascii" }) // 0x00
+  .string("version", { length: 4, encoding: "ascii" }) // 0x04
+  .string("wedResref", { length: 8, encoding: "ascii", stripNull: true }) // 0x08
+  .uint32("lastSaved") // 0x10
+  .uint32("areaFlags") // 0x14
+  .skip(0x54 - 0x18) // соседи, погода
+  .uint32("offsetToActors") // 0x54
+  .uint16("countOfActors") // 0x58
+  .uint16("countOfRegions") // 0x5a
+  .uint32("offsetToRegions") // 0x5c
+  .skip(0x7c - 0x60) // spawn/entrances/containers/items
+  .uint32("offsetToVertices") // 0x7c
+  .uint16("countOfVertices") // 0x80
+  .skip(0xa4 - 0x82) // ambients, variables, ...
+  .uint32("countOfDoors") // 0xa4
+  .uint32("offsetToDoors"); // 0xa8
 
 function parseAreFile(buffer) {
   const header = areHeaderParser.parse(buffer);
@@ -60,6 +64,10 @@ function parseAreFile(buffer) {
       name: a.name || "Unknown",
       x: a.currentX,
       y: a.currentY,
+      destX: a.destX,
+      destY: a.destY,
+      orientation: a.orientation,
+      actorAnimation: a.actorAnimation,
       creFile: a.creResref,
       creOffset: a.creOffset,
       creSize: a.creSize,
@@ -114,4 +122,4 @@ function parseAreFile(buffer) {
   };
 }
 
-module.exports = { parseAreFile };
+module.exports = { parseAreFile, areHeaderParser };
