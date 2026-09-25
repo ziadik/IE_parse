@@ -16,6 +16,8 @@ app.use("/api", require("./routes/bmp"));
 
 app.use("/api", require("./routes/doors"));
 
+app.use("/api", require("./routes/admin"));
+
 app.listen(PORT, async () => {
   console.log(`✅ http://localhost:${PORT}`);
   const { bootstrapPrepare } = require("./lib/bootstrap");
